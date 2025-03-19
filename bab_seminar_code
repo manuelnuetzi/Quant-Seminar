@@ -1,5 +1,10 @@
-% CountryLowBeta: Computes the returns from equally weighted and
-% beta-based portfolios on country ETFs
+% several things
+% dataset ranges from april 1996 to october 2024. October 2024 because some of the aqr factors are not released later
+% 
+% one thing to check is what the data_country is, which indices so we can give specific information about the data used (i.e bloomberg tickers)
+
+% this code is as of 19/03/2025, if new fundamental change to this code pls add new file
+
 
 clc
 clear
