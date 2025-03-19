@@ -6,7 +6,6 @@
 % maybe we have to adjust the timeline e.g that we do the code only until 30/12/2019 so we have enough data then to make a "real oos" test of the strategies
 % and then we can tweak our dynamic stuff in our insample optimization
 
-
 clc
 clear
 close all
@@ -39,7 +38,7 @@ data_ff5 = readtable('F-F_Research_Data_5_Factors_2x3.csv');
 data_ff5{:, 2:end} = data_ff5{:, 2:end} / 100;
 
 
-%% Define the date formats 
+% Define the date formats 
 dateFormat = 'dd.MM.yyyy'; % For data_country and data_mxwo
 % Convert dates to datetime format
 data_country.Date = datetime(data_country.Date, 'InputFormat', dateFormat);
@@ -456,3 +455,113 @@ end
 
 % Write to Excel file
 writetable(resultsTable, 'factor_regression_results.xlsx', 'Sheet', 'Results');
+
+%% Implement Transaction costs
+% Compute strategy returns with transaction costs by subtracting
+% turnover times proportional transaction costs from the returns of each strategy. 
+turnover = zeros(nMonths, 10);
+for m = 1 : nMonths - 1
+    currentRf = monthlyRf(m, 1);
+    currentRet = monthlyTotalReturns_country(m, :);
+    turnover(m, 1) = computeTurnover(equalWeights_country(m, :), equalWeights_country(m + 1, :), currentRet, currentRf);
+    turnover(m, 2) = computeTurnover(lowBetaWeights_country(m, :), lowBetaWeights_country(m + 1, :), currentRet, currentRf); 
+    turnover(m, 3) = computeTurnover(highBetaWeights_country(m, :), highBetaWeights_country(m + 1, :), currentRet, currentRf);
+    turnover(m, 4) = computeTurnover(longShortWeights_country(m, :), longShortWeights_country(m + 1, :), currentRet, currentRf);
+    turnover(m, 5) = computeTurnover(marketNeutralWeights_country(m, :), marketNeutralWeights_country(m + 1, :), currentRet, currentRf);
+    turnover(m, 6) = computeTurnover(equalWeights_mxwo(m, :), equalWeights_mxwo(m + 1, :), currentRet, currentRf);
+    turnover(m, 7) = computeTurnover(lowBetaWeights_mxwo(m, :), lowBetaWeights_mxwo(m + 1, :), currentRet, currentRf); 
+    turnover(m, 8) = computeTurnover(highBetaWeights_mxwo(m, :), highBetaWeights_mxwo(m + 1, :), currentRet, currentRf);
+    turnover(m, 9) = computeTurnover(longShortWeights_mxwo(m, :), longShortWeights_mxwo(m + 1, :), currentRet, currentRf);
+    turnover(m, 10) = computeTurnover(marketNeutralWeights_mxwo(m, :), marketNeutralWeights_mxwo(m + 1, :), currentRet, currentRf);    
+end
+% This is splitting hair a little bit. We're adding the transactions in the initial month.
+turnover(1, 1) = turnover(1, 1) + sum(abs(equalWeights_country(1, :)));
+turnover(1, 2) = turnover(1, 2) + sum(abs(lowBetaWeights_country(1, :)));
+turnover(1, 3) = turnover(1, 3) + sum(abs(highBetaWeights_country(1, :))); 
+turnover(1, 4) = turnover(1, 4) + sum(abs(longShortWeights_country(1, :))); 
+turnover(1, 5) = turnover(1, 5) + sum(abs(marketNeutralWeights_country(1, :))); 
+turnover(1, 6) = turnover(1, 6) + sum(abs(equalWeights_mxwo(1, :))); 
+turnover(1, 7) = turnover(1, 7) + sum(abs(lowBetaWeights_mxwo(1, :))); 
+turnover(1, 8) = turnover(1, 8) + sum(abs(highBetaWeights_mxwo(1, :))); 
+turnover(1, 9) = turnover(1, 9) + sum(abs(longShortWeights_mxwo(1, :))); 
+turnover(1, 10) = turnover(1, 10) + sum(abs(marketNeutralWeights_mxwo(1, :))); 
+
+avgTurnover = mean(turnover)
+
+stratXsReturnsTC_country = stratXsReturnsNoTC_country - tCost * turnover(:,1:5);
+stratXsReturnsTC_msci = stratXsReturnsNoTC_msci - tCost * turnover(:,6:end);
+
+% Performance statistics (benchmark is the crosssectional ew)
+strategyNames_country = {'ew_country', 'lowbeta_country', 'highbeta_country', 'longshort_country', 'bab_country'};
+summarizePerformance(stratXsReturnsTC_country, monthlyRf, stratXsReturnsTC_country(:, 1), annualizationFactor, strategyNames_country, 'perf_countrybeta_withTC');
+
+% Performance statistics (benchmark is the mxwo)
+strategyNames_mxwo = {'ew_mxwo', 'lowbeta_mxwo','highbeta_mxwo', 'longshort_mxwo', 'bab_mxwo'};
+summarizePerformance(stratXsReturnsTC_msci, monthlyRf, stratXsReturnsTC_msci(:, 1), annualizationFactor, strategyNames_mxwo, 'perf_mxwobeta_withTC');
+
+%% Plot with tc
+% Compute cumulative returns for with-TC if not already done
+cum_returnsTC_country = cumprod(1 + stratXsReturnsTC_country);
+cum_returnsTC_msci    = cumprod(1 + stratXsReturnsTC_msci);
+
+% Define colors for each of the 5 strategies
+% For country-based strategies
+colors_country = lines(5);   % or any Nx3 colormap for 5 distinct colors
+
+% For MSCI-based strategies
+colors_msci = lines(5);      % separate colormap so it’s easy to differentiate
+% If you want them to share exactly the same color scheme, 
+% you could reuse `colors_country`.
+
+% Plot
+figure;
+set(gcf, 'Position', [100 100 1000 700]);  % optional resizing
+
+% --- Subplot #1: Country strategies
+subplot(2,1,1);
+hold on;
+for i = 1:size(cum_returns_country, 2)
+    % Plot the no‐TC line (solid)
+    plot(monthlyDates, cum_returns_country(:, i), ...
+        'LineWidth', 0.5, 'Color', colors_country(i, :));
+    % Plot the with‐TC line (dashed), same color
+    plot(monthlyDates, cum_returnsTC_country(:, i), ...
+        '--', 'LineWidth', 0.5, 'Color', colors_country(i, :));
+end
+title('Country Strategies: No TC (solid) vs. With TC (dashed)');
+xlabel('Date'); 
+ylabel('Cumulative Return');
+legend({...
+    'ew\_country (NoTC)', 'ew\_country (TC)', ...
+    'lowbeta\_country (NoTC)', 'lowbeta\_country (TC)', ...
+    'highbeta\_country (NoTC)', 'highbeta\_country (TC)', ...
+    'longshort\_country (NoTC)', 'longshort\_country (TC)', ...
+    'bab\_country (NoTC)', 'bab\_country (TC)'}, ...
+    'Location','best');
+grid on;
+hold off;
+
+% --- Subplot #2: MSCI strategies
+subplot(2,1,2);
+hold on;
+for i = 1:size(cum_returns_msci, 2)
+    % Plot the no‐TC line (solid)
+    plot(monthlyDates, cum_returns_msci(:, i), ...
+        'LineWidth', 0.5, 'Color', colors_msci(i, :));
+    % Plot the with‐TC line (dashed), same color
+    plot(monthlyDates, cum_returnsTC_msci(:, i), ...
+        '--', 'LineWidth', 0.5, 'Color', colors_msci(i, :));
+end
+title('MSCI Strategies: No TC (solid) vs. With TC (dashed)');
+xlabel('Date'); 
+ylabel('Cumulative Return');
+legend({...
+    'ew\_mxwo (NoTC)', 'ew\_mxwo (TC)', ...
+    'lowbeta\_mxwo (NoTC)', 'lowbeta\_mxwo (TC)', ...
+    'highbeta\_mxwo (NoTC)', 'highbeta\_mxwo (TC)', ...
+    'longshort\_mxwo (NoTC)', 'longshort\_mxwo (TC)', ...
+    'bab\_mxwo (NoTC)', 'bab\_mxwo (TC)'}, ...
+    'Location','best');
+grid on;
+hold off;
+
