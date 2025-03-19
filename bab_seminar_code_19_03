@@ -1,9 +1,10 @@
 % several things
 % dataset ranges from april 1996 to october 2024. October 2024 because some of the aqr factors are not released later
-% 
 % one thing to check is what the data_country is, which indices so we can give specific information about the data used (i.e bloomberg tickers)
 
 % this code is as of 19/03/2025, if new fundamental change to this code pls add new file
+% maybe we have to adjust the timeline e.g that we do the code only until 30/12/2019 so we have enough data then to make a "real oos" test of the strategies
+% and then we can tweak our dynamic stuff in our insample optimization
 
 
 clc
