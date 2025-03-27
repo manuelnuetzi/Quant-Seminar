@@ -1,10 +1,5 @@
-% several things
-% dataset ranges from april 1996 to october 2024. October 2024 because some of the aqr factors are not released later
-% one thing to check is what the data_country is, which indices so we can give specific information about the data used (i.e bloomberg tickers)
-
-% this code is as of 19/03/2025, if new fundamental change to this code pls add new file
-% maybe we have to adjust the timeline e.g that we do the code only until 30/12/2019 so we have enough data then to make a "real oos" test of the strategies
-% and then we can tweak our dynamic stuff in our insample optimization
+% CountryLowBeta: Computes the returns from equally weighted and
+% beta-based portfolios on country ETFs
 
 clc
 clear
@@ -58,6 +53,7 @@ data_vix = table2timetable(data_vix);
 data_mxwo = table2timetable(data_mxwo);
 data_bab_qmj_umd = table2timetable(data_bab_qmj_umd);
 data_ff5 = table2timetable(data_ff5);
+
 
 mergedTable = synchronize(data_country, data_vix, data_mxwo, 'first');
 
@@ -190,7 +186,8 @@ for m = firstMonth : nMonths
     b = X \ Y;
     monthlyBetas_mxwo(m, :) = b(2, :);    
 end
-%
+
+%%
 % Construct the static portfolios weights for cross sectional betas
 equalWeights_country = zeros(nMonths, nAssets);
 lowBetaWeights_country = zeros(nMonths, nAssets);
@@ -316,6 +313,7 @@ stratXsReturnsNoTC_country(:, 3) = sum(monthlyXsReturns_country .* highBetaWeigh
 stratXsReturnsNoTC_country(:, 4) = sum(monthlyXsReturns_country .* longShortWeights_country, 2);
 stratXsReturnsNoTC_country(:, 5) = sum(monthlyXsReturns_country .* marketNeutralWeights_country, 2);
 
+
 %
 stratXsReturnsNoTC_msci = zeros(nMonths, nStrategies);
 stratXsReturnsNoTC_msci(:, 1) = sum(monthlyXsReturns_country .* equalWeights_mxwo, 2);
@@ -383,14 +381,16 @@ legend([strategyNames_country, strategyNames_msci], 'Location', 'Best', 'TextCol
 grid on;
 hold off;
 
-%% factor regression
+%% Factor Regression
 % Extract AQR and FF5 factors
-aqrFactors = monthlyFactorsArray(:, 1:3); % BAB, QMJ, UMD
+aqrFactors = monthlyFactorsArray(:, [1, 2, 3, 4]); % BAB, QMJ, UMD, Mkt_RF
 ff5Factors = monthlyFactorsArray(:, 4:8); % Mkt_RF, SMB, HML, RMW, CMA
 
+strategyNames_country4factors = {'ew_country', 'lowbeta_country', 'highbeta_country', 'longshort_country', 'bab_country'};
+strategyNames_msci4factors = {'ew_mxwo', 'lowbeta_mxwo', 'highbeta_mxwo', 'longshort_mxwo', 'bab_mxwo'};
 % Combine all strategies and their names
 allStrategies = [stratXsReturnsNoTC_country, stratXsReturnsNoTC_msci];
-strategyNames = [strategyNames_country, strategyNames_msci];
+strategyNames = [strategyNames_country4factors, strategyNames_msci4factors];
 
 % Initialize results cell array
 resultsCell = {};
@@ -400,8 +400,8 @@ for i = 1:size(allStrategies, 2)
     strategyReturns = allStrategies(:, i);
     strategyName = strategyNames{i};
     
-    % AQR Regression
-    modelAQR = fitlm(aqrFactors, strategyReturns, 'VarNames', {'BAB','QMJ','UMD','Returns'});
+    % AQR Regression (now includes Mkt_RF)
+    modelAQR = fitlm(aqrFactors, strategyReturns, 'VarNames', {'BAB','QMJ','UMD','Mkt_RF','Returns'});
     coeffAQR = modelAQR.Coefficients;
     rsqAQR = modelAQR.Rsquared.Adjusted;
     
@@ -419,6 +419,7 @@ for i = 1:size(allStrategies, 2)
     aqrBAB = formatCoeff(coeffAQR('BAB',:));
     aqrQMJ = formatCoeff(coeffAQR('QMJ',:));
     aqrUMD = formatCoeff(coeffAQR('UMD',:));
+    aqrMkt = formatCoeff(coeffAQR('Mkt_RF',:));
     
     % FF5 Coefficients
     ff5Intercept = formatCoeff(coeffFF5('(Intercept)',:));
@@ -429,13 +430,13 @@ for i = 1:size(allStrategies, 2)
     ff5CMA = formatCoeff(coeffFF5('CMA',:));
     
     % Append to results
-    resultsCell(end+1,:) = {strategyName, aqrIntercept, aqrBAB, aqrQMJ, aqrUMD, ...
+    resultsCell(end+1,:) = {strategyName, aqrIntercept, aqrBAB, aqrQMJ, aqrUMD, aqrMkt, ...
         sprintf('%.3f', rsqAQR), ff5Intercept, ff5Mkt, ff5SMB, ff5HML, ff5RMW, ff5CMA, ...
         sprintf('%.3f', rsqFF5)};
 end
 
 % Create and display table
-varNames = {'Strategy','AQR_Alpha','AQR_BAB','AQR_QMJ','AQR_UMD','AQR_R2',...
+varNames = {'Strategy','AQR_Alpha','AQR_BAB','AQR_QMJ','AQR_UMD','AQR_Mkt','AQR_R2',...
     'FF5_Alpha','FF5_Mkt','FF5_SMB','FF5_HML','FF5_RMW','FF5_CMA','FF5_R2'};
 resultsTable = cell2table(resultsCell, 'VariableNames', varNames);
 disp(resultsTable);
@@ -455,6 +456,7 @@ end
 
 % Write to Excel file
 writetable(resultsTable, 'factor_regression_results.xlsx', 'Sheet', 'Results');
+
 
 %% Implement Transaction costs
 % Compute strategy returns with transaction costs by subtracting
@@ -486,6 +488,7 @@ turnover(1, 8) = turnover(1, 8) + sum(abs(highBetaWeights_mxwo(1, :)));
 turnover(1, 9) = turnover(1, 9) + sum(abs(longShortWeights_mxwo(1, :))); 
 turnover(1, 10) = turnover(1, 10) + sum(abs(marketNeutralWeights_mxwo(1, :))); 
 
+% 1:5 is based on country beta, 6:end is based on mxwo beta
 avgTurnover = mean(turnover)
 
 stratXsReturnsTC_country = stratXsReturnsNoTC_country - tCost * turnover(:,1:5);
@@ -499,7 +502,7 @@ summarizePerformance(stratXsReturnsTC_country, monthlyRf, stratXsReturnsTC_count
 strategyNames_mxwo = {'ew_mxwo', 'lowbeta_mxwo','highbeta_mxwo', 'longshort_mxwo', 'bab_mxwo'};
 summarizePerformance(stratXsReturnsTC_msci, monthlyRf, stratXsReturnsTC_msci(:, 1), annualizationFactor, strategyNames_mxwo, 'perf_mxwobeta_withTC');
 
-%% Plot with tc
+% Plot with tc
 % Compute cumulative returns for with-TC if not already done
 cum_returnsTC_country = cumprod(1 + stratXsReturnsTC_country);
 cum_returnsTC_msci    = cumprod(1 + stratXsReturnsTC_msci);
@@ -564,4 +567,7 @@ legend({...
     'Location','best');
 grid on;
 hold off;
+
+
+
 
