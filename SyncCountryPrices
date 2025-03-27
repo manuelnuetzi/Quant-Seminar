@@ -1,0 +1,141 @@
+% This code is to merge the Country Prices from the Excel file and sync their dates
+
+clc
+clear
+close all
+
+data_country = readtable('quantseminar_manuel.xlsx', 'Format', 'auto', 'TreatAsEmpty', {'#N/A N/A'});
+
+%%
+data_austria = data_country(:,1:2);
+data_belgium = data_country(:,3:4);
+data_france = data_country(:,5:6);
+data_germany = data_country(:,7:8);
+data_italy = data_country(:,9:10);
+data_netherlands = data_country(:,11:12);
+data_spain = data_country(:,13:14);
+data_sweden = data_country(:,15:16);
+data_switzerland = data_country(:,17:18);
+data_uk = data_country(:,19:20);
+data_australia = data_country(:,21:22);
+data_japan = data_country(:,23:24);
+data_hongkong = data_country(:,25:26);
+data_singapore = data_country(:,27:28);
+data_china = data_country(:,29:30);
+data_malaysia = data_country(:,31:32);
+data_southkorea = data_country(:,33:34);
+data_taiwan = data_country(:,35:36);
+data_thailand = data_country(:,37:38);
+data_india = data_country(:,39:40);
+data_canada = data_country(:,41:42);
+data_brazil = data_country(:,43:44);
+data_mexico = data_country(:,45:46);
+data_chile = data_country(:,47:48);
+data_southafrica = data_country(:,49:50);
+data_turkey = data_country(:,51:52);
+data_us = data_country(:,53:54);
+data_russia = data_country(:,55:56);
+
+% Define the date format
+dateFormat = 'dd.MM.yyyy';
+
+% Define the date format
+dateFormat = 'dd.MM.yyyy';
+
+% Convert and assign original date column names
+data_austria.Date      = datetime(data_country.Date,     'InputFormat', dateFormat);
+data_belgium.Date_1    = datetime(data_country.Date_1,   'InputFormat', dateFormat);
+data_france.Date_2     = datetime(data_country.Date_2,   'InputFormat', dateFormat);
+data_germany.Date_3    = datetime(data_country.Date_3,   'InputFormat', dateFormat);
+data_italy.Date_4      = datetime(data_country.Date_4,   'InputFormat', dateFormat);
+data_netherlands.Date_5= datetime(data_country.Date_5,   'InputFormat', dateFormat);
+data_spain.Date_6      = datetime(data_country.Date_6,   'InputFormat', dateFormat);
+data_sweden.Date_7     = datetime(data_country.Date_7,   'InputFormat', dateFormat);
+data_switzerland.Date_8= datetime(data_country.Date_8,   'InputFormat', dateFormat);
+data_uk.Date_9         = datetime(data_country.Date_9,   'InputFormat', dateFormat);
+data_australia.Date_10 = datetime(data_country.Date_10,  'InputFormat', dateFormat);
+data_japan.Date_11     = datetime(data_country.Date_11,  'InputFormat', dateFormat);
+data_hongkong.Date_12  = datetime(data_country.Date_12,  'InputFormat', dateFormat);
+data_singapore.Date_13 = datetime(data_country.Date_13,  'InputFormat', dateFormat);
+data_china.Date_14     = datetime(data_country.Date_14,  'InputFormat', dateFormat);
+data_malaysia.Date_15  = datetime(data_country.Date_15,  'InputFormat', dateFormat);
+data_southkorea.Date_16= datetime(data_country.Date_16,  'InputFormat', dateFormat);
+data_taiwan.Date_17    = datetime(data_country.Date_17,  'InputFormat', dateFormat);
+data_thailand.Date_18  = datetime(data_country.Date_18,  'InputFormat', dateFormat);
+data_india.Date_19     = datetime(data_country.Date_19,  'InputFormat', dateFormat);
+data_canada.Date_20    = datetime(data_country.Date_20,  'InputFormat', dateFormat);
+data_brazil.Date_21    = datetime(data_country.Date_21,  'InputFormat', dateFormat);
+data_mexico.Date_22    = datetime(data_country.Date_22,  'InputFormat', dateFormat);
+data_chile.Date_23     = datetime(data_country.Date_23,  'InputFormat', dateFormat);
+data_southafrica.Date_24 = datetime(data_country.Date_24, 'InputFormat', dateFormat);
+data_turkey.Date_25    = datetime(data_country.Date_25,  'InputFormat', dateFormat);
+data_us.Date_26        = datetime(data_country.Date_26,  'InputFormat', dateFormat);
+data_russia.Date_27    = datetime(data_country.Date_27,  'InputFormat', dateFormat);
+
+data_austria = table2timetable(data_austria, 'RowTimes', 'Date');
+data_belgium = table2timetable(data_belgium, 'RowTimes', 'Date_1');
+data_france = table2timetable(data_france, 'RowTimes', 'Date_2');
+data_germany = table2timetable(data_germany, 'RowTimes', 'Date_3');
+data_italy = table2timetable(data_italy, 'RowTimes', 'Date_4');
+data_netherlands = table2timetable(data_netherlands, 'RowTimes', 'Date_5');
+data_spain = table2timetable(data_spain, 'RowTimes', 'Date_6');
+data_sweden = table2timetable(data_sweden, 'RowTimes', 'Date_7');
+data_switzerland = table2timetable(data_switzerland, 'RowTimes', 'Date_8');
+data_uk = table2timetable(data_uk, 'RowTimes', 'Date_9');
+data_australia = table2timetable(data_australia, 'RowTimes', 'Date_10');
+data_japan = table2timetable(data_japan, 'RowTimes', 'Date_11');
+data_hongkong = table2timetable(data_hongkong, 'RowTimes', 'Date_12');
+data_singapore = table2timetable(data_singapore, 'RowTimes', 'Date_13');
+data_china = table2timetable(data_china, 'RowTimes', 'Date_14');
+data_malaysia = table2timetable(data_malaysia, 'RowTimes', 'Date_15');
+data_southkorea = table2timetable(data_southkorea, 'RowTimes', 'Date_16');
+data_taiwan = table2timetable(data_taiwan, 'RowTimes', 'Date_17');
+data_thailand = table2timetable(data_thailand, 'RowTimes', 'Date_18');
+data_india = table2timetable(data_india, 'RowTimes', 'Date_19');
+data_canada = table2timetable(data_canada, 'RowTimes', 'Date_20');
+data_brazil = table2timetable(data_brazil, 'RowTimes', 'Date_21');
+data_mexico = table2timetable(data_mexico, 'RowTimes', 'Date_22');
+data_chile = table2timetable(data_chile, 'RowTimes', 'Date_23');
+data_southafrica = table2timetable(data_southafrica, 'RowTimes', 'Date_24');
+data_turkey = table2timetable(data_turkey, 'RowTimes', 'Date_25');
+data_us = table2timetable(data_us, 'RowTimes', 'Date_26');
+data_russia = table2timetable(data_russia, 'RowTimes', 'Date_27');
+
+mergedTable = synchronize( ...
+    data_us, ...
+    data_austria, ...
+    data_belgium, ...
+    data_france, ...
+    data_germany, ...
+    data_italy, ...
+    data_netherlands, ...
+    data_spain, ...
+    data_sweden, ...
+    data_switzerland, ...
+    data_uk, ...
+    data_australia, ...
+    data_japan, ...
+    data_hongkong, ...
+    data_singapore, ...
+    data_china, ...
+    data_malaysia, ...
+    data_southkorea, ...
+    data_taiwan, ...
+    data_thailand, ...
+    data_india, ...
+    data_canada, ...
+    data_brazil, ...
+    data_mexico, ...
+    data_chile, ...
+    data_southafrica, ...
+    data_turkey, ...
+    data_russia, ...
+    'first');
+
+% Define the cutoff date
+startDate = datetime('01.04.1996', 'InputFormat', 'dd.MM.yyyy');
+
+% Keep only rows from that date onward
+mergedTable = mergedTable(mergedTable.Date_26 >= startDate, :);
+
+mergedTable = sortrows(mergedTable, 'Date_26', 'ascend');
