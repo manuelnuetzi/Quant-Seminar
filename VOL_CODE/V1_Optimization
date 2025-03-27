@@ -1,0 +1,875 @@
+% CountryLowBeta: Computes the returns from equally weighted and
+% beta-based portfolios on country ETFs
+clc
+clear
+close all
+% Parameter selection
+% Annualization factor for monthly to annual
+annualizationFactor = 12;
+% Number of countries held long and short (nShorts is ignored in the
+% long-only versions)
+% Proportional transaction costs
+tCost = 0.001;
+% Trading lag in 
+lag = 1;
+% Beta computation lookback period in months. Note that we must use 59 and not 60 months here.
+lookbackStart = 59;
+nLongs = 5
+nShorts = 5
+
+% In-sample and out-of-sample periods
+inSampleEnd = datetime(2014,12,31);
+outSampleStart = datetime(2015,1,1);
+
+% Load the data and extract the dates, riskless rate, and ETF prices
+data_country = readtable('CountryData.xlsx', 'Format', 'auto', 'TreatAsEmpty', {'#N/A N/A'});
+data_vix = readtable('VOLINDEX.xlsx', 'Format', 'auto', 'TreatAsEmpty', {'#N/A N/A'});
+data_mxwo = readtable('msciallworld.xlsx', 'Format', 'auto', 'TreatAsEmpty', {'#N/A N/A'});
+%load factors
+% qmj and bab
+data_bab_qmj_umd= readtable('BAB_QMJ_UMD.xlsx', 'Format', 'auto', 'TreatAsEmpty', {'#N/A N/A'});
+%load ff5 factors
+data_ff5 = readtable('F-F_Research_Data_5_Factors_2x3.csv');
+data_ff5{:, 2:end} = data_ff5{:, 2:end} / 100;
+
+%% Define the date formats 
+dateFormat = 'dd.MM.yyyy'; % For data_country and data_mxwo
+% Convert dates to datetime format
+data_country.Date = datetime(data_country.Date, 'InputFormat', dateFormat);
+data_vix.Date = datetime(data_vix.Date, 'InputFormat', dateFormat);
+data_mxwo.Date = datetime(data_mxwo.Date, 'InputFormat', dateFormat);
+data_bab_qmj_umd.Date = datetime(data_bab_qmj_umd.Date, 'InputFormat', 'MM/dd/yyyy'); % Adjust format if needed
+
+% Convert numeric YYYYMM to string and then to datetime (initially first day of month)
+data_ff5.Date = datetime(num2str(data_ff5.Date), 'InputFormat', 'yyyyMM', 'Format', 'yyyy-MM-dd');
+% Adjust to the last day of the respective month
+data_ff5.Date = dateshift(data_ff5.Date, 'end', 'month');
+
+% If dates load as datetimes, one can also use readtimetable instead of
+% readtable, then the table2timetable commands below can be skipped.
+data_country = table2timetable(data_country);
+data_vix = table2timetable(data_vix);
+data_mxwo = table2timetable(data_mxwo);
+data_bab_qmj_umd = table2timetable(data_bab_qmj_umd);
+data_ff5 = table2timetable(data_ff5);
+
+mergedTable = synchronize(data_country, data_vix, data_mxwo, 'first');
+
+% sync factors
+mergedFactors_monthly = synchronize(data_bab_qmj_umd, data_ff5, 'first');
+
+% Generate arrays with the different variables matched to the previous sync before
+country_prices = table2array(mergedTable(:, 2 : 29));
+mxwo_prices = table2array(mergedTable(:, 31));
+vix = table2array(mergedTable(:, 30));
+Rf = table2array(mergedTable(:, 1))/100;
+
+%fill N/A values of vix values with previous
+vix = fillmissing(vix, 'previous');
+
+% Check for NaNs in each dataset
+missing_VIX = any(isnan(vix), 'all');
+missing_MXWO = any(isnan(mxwo_prices), 'all');
+missing_Rf = any(isnan(Rf), 'all');
+
+
+% Anzahl der Werte größer als xx (just for idea)
+num_values = sum(vix > 18);
+
+% Ergebnis anzeigen
+fprintf('Anzahl der Werte in VIX, die größer als xx sind: %d\n', num_values);
+
+% create dates based on merged table
+dates = mergedTable.Date;
+
+% Size of the dataset
+nDays = length(dates)
+nAssets = width(country_prices)
+
+% Generate numeric dates in the format YYYYMMDD so that we can reuse 
+% the functions we developed previously. 
+datesYyyymmdd = yyyymmdd(dates);
+
+% Compute the return earned on the riskless asset on each trading day, accounting for
+% the number of calendar days until the next trading day. Shift the result
+% down by one day so that it represents the return accrued on that day
+dayCount = days(diff(dates));
+% create rfscaled
+RfScaled = zeros(nDays, 1);
+RfScaled(2 : end, 1) = Rf(1 : end - 1, 1) .* dayCount / 360;
+
+% Debug RfScaled
+if ~isnumeric(RfScaled) || any(~isfinite(RfScaled))
+    error('RfScaled contains non-numeric or non-finite values');
+end
+
+% Compute daily country returns
+countryreturns = zeros(nDays, nAssets);
+countryreturns(2 : end, :) = country_prices(2 : end, :) ./ country_prices(1 : end - 1, :) - 1;
+countryXsReturns = countryreturns - RfScaled;
+
+% Compute daily mxwo returns
+mxworeturns = zeros(nDays, 1);
+mxworeturns(2 : end, :) = mxwo_prices(2 : end, :) ./ mxwo_prices(1 : end - 1, :) - 1;
+
+% Treasury-Rate als Risk-Free-Rate verwendet.
+mxwoXsReturns = mxworeturns - RfScaled;
+
+
+% Compute cross-sectional average excess returns on the ETFs for beta estimation
+% market_country = The xsreturns of the cross sectional average of all countries
+market_country = mean(countryXsReturns, 2, "omitnan");
+% market_mxwo = The xsreturn of the MSCI All World Index
+market_mxwo = mxwoXsReturns;
+
+% beta construction 2: Obtain monthly beta estimates to construct portfolio weights
+% First, generate arrays listing the first and last day of each month
+[firstDayList, lastDayList] = getFirstAndLastDayInPeriod(datesYyyymmdd, 2);
+monthlyDates = dates(lastDayList);
+nMonths = length(firstDayList)
+monthlyBetas_mxwo = zeros(nMonths, nAssets);
+% Second, estimate the betas using five-year trailing windows
+firstMonth = lookbackStart + 1;
+for m = firstMonth : nMonths
+    first = firstDayList(m - lookbackStart);
+    last = lastDayList(m) - lag;
+    X = [ones(last - first + 1, 1), market_mxwo(first : last, 1)];
+    Y = countryXsReturns(first : last, :);
+    b = X \ Y;
+    monthlyBetas_mxwo(m, :) = b(2, :);    
+end
+
+% Weight calculation based on VIX Leverage Adjustment, only based on current VIX
+% VIX thresholds and leverage multipliers
+vixThresholds = [15, 25, 40];
+leverageMultipliers = [1.5, 1.0, 0.5, 0.0]; % [VIX <15, 15≤VIX≤25, 25<VIX≤40, VIX>40]
+
+% Construct the static portfolios weights for MSCI All World betas
+equalWeights_mxwo = zeros(nMonths, nAssets);
+lowBetaWeights_mxwo = zeros(nMonths, nAssets);
+highBetaWeights_mxwo = zeros(nMonths, nAssets);
+longShortWeights_mxwo = zeros(nMonths, nAssets);
+marketNeutralWeights_mxwo = zeros(nMonths, nAssets);
+benchmarkWeights = ones(nMonths, 1);
+
+for m = firstMonth : nMonths
+    % Equally weighted portfolio
+    nonMissings_mxwo = isfinite(country_prices(lastDayList(m), :));
+    equalWeights_mxwo(m, :) = nonMissings_mxwo / sum(nonMissings_mxwo);
+    
+    % Low-beta and high-beta portfolios, long only
+    lowBetaWeights_mxwo(m, :) = computeSortWeights(monthlyBetas_mxwo(m, :), nLongs, 0, 0);
+    highBetaWeights_mxwo(m, :) = computeSortWeights(monthlyBetas_mxwo(m, :), nLongs, 0, 1);
+    
+    % Long-short portfolio
+    longShortWeights_mxwo(m, :) = computeSortWeights(monthlyBetas_mxwo(m, :), nLongs, nShorts, 0);
+    
+    % Market-neutral strategy
+    longBeta_mxwo = sum(lowBetaWeights_mxwo(m, :) .* monthlyBetas_mxwo(m, :), "omitnan");
+    shortBeta_mxwo = sum(highBetaWeights_mxwo(m, :) .* monthlyBetas_mxwo(m, :), "omitnan");
+    marketNeutralWeights_mxwo(m, :) = lowBetaWeights_mxwo(m, :) / longBeta_mxwo - highBetaWeights_mxwo(m, :) / shortBeta_mxwo;
+
+    % --- Dynamic Leverage Adjustment ---
+    currentVIX = vix(lastDayList(m));
+
+    % Determine leverage multiplier (same as above)
+    if currentVIX < vixThresholds(1)
+        leverage = leverageMultipliers(1);
+        longShortAdj = 1;
+    elseif currentVIX <= vixThresholds(2)
+        leverage = leverageMultipliers(2);
+        longShortAdj = 1.1;
+    elseif currentVIX <= vixThresholds(3)
+        leverage = leverageMultipliers(3);
+        longShortAdj = 1;
+    else
+        leverage = leverageMultipliers(4);
+        longShortAdj = 1.4;
+    end
+
+    % Apply leverage to Equally Weighted, Low-Beta, High-Beta portfolios
+    equalWeights_mxwo(m, :) = equalWeights_mxwo(m, :) * leverage;
+    lowBetaWeights_mxwo(m, :) = lowBetaWeights_mxwo(m, :) * leverage;
+    highBetaWeights_mxwo(m, :) = highBetaWeights_mxwo(m, :) * leverage;
+
+    % Adjust Long-Short and Market-Neutral dynamically
+    longShortWeights_mxwo(m, :) = (lowBetaWeights_mxwo(m, :) * longShortAdj) - ...
+                                  (highBetaWeights_mxwo(m, :) / longShortAdj);
+    
+    marketNeutralWeights_mxwo(m, :) = (lowBetaWeights_mxwo(m, :) * longShortAdj) / longBeta_mxwo - ...
+                                      (highBetaWeights_mxwo(m, :) / longShortAdj) / shortBeta_mxwo;
+
+    benchmarkWeights(m,:) = benchmarkWeights(m,:) * leverage;
+end
+
+
+% Data cleaning continued
+% Compute monthly returns on the assets. 
+monthlyDayCount = days(diff(monthlyDates));
+% Same as: monthlyDayCount = days(monthlyDates(2 : end, 1) - monthlyDates(1 : end - 1, 1));
+% Note that we need to use the rates at month-end. Compounding RfScaled would be wrong.
+monthEndRf = Rf(lastDayList); 
+monthlyRf = zeros(nMonths, 1);
+monthlyRf(2 : end, 1) = monthEndRf(1 : end - 1, 1) .* monthlyDayCount / 360;
+% Now do the ETFs. To handle delistings that take place during the month, just replace NaNs with zeros.
+countryreturns(isnan(countryreturns)) = 0;
+monthlyTotalReturns_country = aggregateReturns(countryreturns, datesYyyymmdd, 2);
+monthlyXsReturns_country = monthlyTotalReturns_country - monthlyRf;
+
+% compute msci normal returns to use it as a benchmark comparison
+mxworeturns(isnan(mxworeturns)) = 0;
+monthlyTotalReturns_mxwo = aggregateReturns(mxworeturns, datesYyyymmdd, 2);
+monthlyXsReturns_mxwo = monthlyTotalReturns_mxwo - monthlyRf;
+
+% doublecheck if factors match the monthly dates so we can drop the first months series in next step
+% Suppose monthlyDates is N×1 and mergedFactors_monthly has N rows as well.
+% 1) Check if they are the same length:
+if numel(monthlyDates) ~= height(mergedFactors_monthly)
+    error('They have different lengths, so they cannot match one-to-one.');
+end
+
+% 2) Compare year and month only:
+sameYearMonth = (year(monthlyDates) == year(mergedFactors_monthly.Date)) & ...
+                (month(monthlyDates) == month(mergedFactors_monthly.Date));
+
+% 3) Check if all match:
+if all(sameYearMonth)
+    disp('All monthlyDates match mergedFactors_monthly by year & month (ignoring day).');
+else
+    disp('Some entries do NOT match by year & month. See indices below:');
+    find(~sameYearMonth)
+end
+
+% Drop firstMonth months from the arrays. In order to have weights and
+% returns in sync, one drops firstMonth months from the beginning of the 
+% return series, and (firstMonth - 1) months from the beginning and one 
+% Drop initial months for synchronization
+monthlyDates = monthlyDates(firstMonth+1:end);
+
+monthlyTotalReturns_country = monthlyTotalReturns_country(firstMonth+1:end, :);
+monthlyTotalReturns_mxwo = monthlyTotalReturns_mxwo(firstMonth+1:end, :);
+
+monthlyRf = monthlyRf(firstMonth+1:end, :);
+
+monthlyXsReturns_country = monthlyXsReturns_country(firstMonth+1:end, :);
+monthlyXsReturns_mxwo = monthlyXsReturns_mxwo(firstMonth+1:end, :);
+
+monthlyFactors = mergedFactors_monthly(firstMonth+1:end, :);
+monthlyFactorsArray = table2array(monthlyFactors(:, 1:8));
+
+equalWeights_mxwo = equalWeights_mxwo(firstMonth:end-1, :);
+lowBetaWeights_mxwo = lowBetaWeights_mxwo(firstMonth:end-1, :);
+highBetaWeights_mxwo = highBetaWeights_mxwo(firstMonth:end-1, :);
+longShortWeights_mxwo = longShortWeights_mxwo(firstMonth:end-1, :);
+marketNeutralWeights_mxwo = marketNeutralWeights_mxwo(firstMonth:end-1, :);
+benchmarkWeights = benchmarkWeights(firstMonth:end-1, :);
+
+monthlyBetas_mxwo = monthlyBetas_mxwo(firstMonth:end-1,:);
+nMonths = nMonths - firstMonth;
+
+
+% From here we split the sample
+%pre split is/oos betas (i just put in the numbers for the split (1:165),
+%maybe adjust this later so its based on variable)
+
+% in sample period split
+% betas
+monthlyBetas_mxwo_IS = monthlyBetas_mxwo(1:165,:);
+% rest
+insampleIdx = monthlyDates <= inSampleEnd;
+
+monthlyDates_IS             = monthlyDates(insampleIdx);
+
+monthlyTotalReturns_country_IS = monthlyTotalReturns_country(insampleIdx, :);
+monthlyTotalReturns_mxwo_IS = monthlyTotalReturns_mxwo(insampleIdx, :);
+
+monthlyRf_IS                 = monthlyRf(insampleIdx, :);
+
+monthlyXsReturns_country_IS  = monthlyXsReturns_country(insampleIdx, :);
+monthlyXsReturns_mxwo_IS     = monthlyXsReturns_mxwo(insampleIdx, :);
+
+monthlyFactors_IS            = monthlyFactors(insampleIdx, :);
+
+equalWeights_mxwo_IS         = equalWeights_mxwo(insampleIdx, :);
+lowBetaWeights_mxwo_IS       = lowBetaWeights_mxwo(insampleIdx, :);
+highBetaWeights_mxwo_IS      = highBetaWeights_mxwo(insampleIdx, :);
+longShortWeights_mxwo_IS     = longShortWeights_mxwo(insampleIdx, :);
+marketNeutralWeights_mxwo_IS = marketNeutralWeights_mxwo(insampleIdx, :);
+benchmarkWeights_IS          = benchmarkWeights(insampleIdx, :);
+
+nMonths_IS                   = sum(insampleIdx);
+
+% IN SAMPLE RETURN COMPUTATION / PERF STATS / PLOT
+% Compute strategy returns without transaction costs. 
+% Working with excess returns is easier.
+nStrategies = 6
+%
+stratXsReturnsNoTC_msci_IS = zeros(nMonths_IS, nStrategies);
+stratXsReturnsNoTC_msci_IS(:, 1) = sum(monthlyXsReturns_country_IS .* equalWeights_mxwo_IS, 2);
+stratXsReturnsNoTC_msci_IS(:, 2) = sum(monthlyXsReturns_country_IS .* lowBetaWeights_mxwo_IS, 2);
+stratXsReturnsNoTC_msci_IS(:, 3) = sum(monthlyXsReturns_country_IS .* highBetaWeights_mxwo_IS, 2);
+stratXsReturnsNoTC_msci_IS(:, 4) = sum(monthlyXsReturns_country_IS .* longShortWeights_mxwo_IS, 2);
+stratXsReturnsNoTC_msci_IS(:, 5) = sum(monthlyXsReturns_country_IS .* marketNeutralWeights_mxwo_IS, 2);
+stratXsReturnsNoTC_msci_IS(:, 6) = sum(monthlyXsReturns_mxwo_IS.* benchmarkWeights_IS, 2);
+
+
+% Performance statistics (benchmark is the mxwo)
+strategyNames_mxwo_IS = {'ew_mxwo', 'lowbeta_mxwo','highbeta_mxwo', 'longshort_mxwo', 'bab_mxwo', 'BENCHMARK'};
+summarizePerformance(stratXsReturnsNoTC_msci_IS, monthlyRf_IS, stratXsReturnsNoTC_msci_IS(:, 1), annualizationFactor, strategyNames_mxwo_IS, 'perf_mxwobeta_IS');
+
+% Compute cumulative returns
+cum_returns_msci_IS = cumprod(1 + stratXsReturnsNoTC_msci_IS);
+
+%% Define strategy names
+strategyNames_msci = {'EW MSCI', 'Low Beta MSCI', 'High Beta MSCI', 'Long-Short MSCI', 'Market Neutral MSCI', 'BENCHMARK'};
+
+% Define colors for better visibility
+colors = lines(length(strategyNames_msci)); % Use MATLAB's default color map for clarity
+
+% Open figure and hold
+figure;
+hold on;
+set(gcf, 'Position', [100, 100, 1200, 600]); % Adjust figure size
+
+% Plot MSCI-based strategies
+for i = 1:size(cum_returns_msci_IS, 2)
+    if i == 1
+        plot(monthlyDates_IS, cum_returns_msci_IS(:, i), '-', 'Color', colors(i, :), 'LineWidth', 2); % EW strategy solid
+    else
+        plot(monthlyDates_IS, cum_returns_msci_IS(:, i), '--', 'Color', colors(i, :), 'LineWidth', 1.5); % Others dashed
+    end
+end
+
+% Improve readability
+xlabel('Date', 'FontSize', 14, 'FontWeight', 'bold');
+ylabel('Cumulative Return', 'FontSize', 14, 'FontWeight', 'bold');
+title('In-Sample Cumulative Performance of MSCI-Based Strategies', 'FontSize', 16, 'FontWeight', 'bold');
+
+% Format y-axis (log-scale)
+set(gca, 'YScale', 'log', 'FontSize', 12);
+grid on;
+box on;
+
+% Improve tick formatting
+datetick('x', 'yyyy', 'keeplimits'); % Show years on x-axis
+
+% Legend settings
+legend(strategyNames_msci, 'Location', 'NorthWest', 'FontSize', 12, 'Box', 'off');
+
+% Finalize plot
+hold off;
+
+%%
+%% ===== 1. PARAMETER OPTIMIZATION (Refined) =====
+% Define parameter grids specifically for each VIX regime based on your target values
+grid_lev_1 = 1.4:0.1:1.6;  % For VIX < vixThresholds(1), default: 1.5
+grid_adj_1 = 0.9:0.1:1.1;  % For VIX < vixThresholds(1), default: 1.0
+
+grid_lev_2 = 0.9:0.1:1.1;  % For 15 ≤ VIX ≤ vixThresholds(2), default: 1.0
+grid_adj_2 = 1.0:0.1:1.2;  % For 15 ≤ VIX ≤ vixThresholds(2), default: 1.1
+
+grid_lev_3 = 0.4:0.1:0.6;  % For VIX ≤ vixThresholds(3), default: 0.5
+grid_adj_3 = 0.9:0.1:1.1;  % For VIX ≤ vixThresholds(3), default: 1.0
+
+grid_lev_4 = 0.0:0.1:0.2;  % For VIX > vixThresholds(3), default: 0.0
+grid_adj_4 = 1.3:0.1:1.5;  % For VIX > vixThresholds(3), default: 1.4
+
+% Create grid of all combinations (each row is a candidate: [lev1, adj1, lev2, adj2, lev3, adj3, lev4, adj4])
+[lev1, adj1, lev2, adj2, lev3, adj3, lev4, adj4] = ndgrid(grid_lev_1, grid_adj_1, ...
+                                                          grid_lev_2, grid_adj_2, ...
+                                                          grid_lev_3, grid_adj_3, ...
+                                                          grid_lev_4, grid_adj_4);
+combinations = [lev1(:), adj1(:), lev2(:), adj2(:), lev3(:), adj3(:), lev4(:), adj4(:)];
+
+% Set turnover penalty (to account for trading costs)
+turnoverPenalty = 0.1; 
+
+bestSharpe = -Inf;
+optimalParams = struct();
+
+% Loop over each candidate combination
+for i = 1:size(combinations,1)
+    currentParams = combinations(i,:);
+    babWeights = zeros(nMonths_IS, nAssets);
+    babReturns = zeros(nMonths_IS, 1);
+    
+    for m = 1:nMonths_IS
+        currentVIX = vix(lastDayList(m + firstMonth - 1));
+        
+        % Use candidate parameters for each regime:
+        if currentVIX < vixThresholds(1)
+            leverage    = currentParams(1);  % grid_lev_1
+            longShortAdj = currentParams(2);  % grid_adj_1
+        elseif currentVIX <= vixThresholds(2)
+            leverage    = currentParams(3);  % grid_lev_2
+            longShortAdj = currentParams(4);  % grid_adj_2
+        elseif currentVIX <= vixThresholds(3)
+            leverage    = currentParams(5);  % grid_lev_3
+            longShortAdj = currentParams(6);  % grid_adj_3
+        else
+            leverage    = currentParams(7);  % grid_lev_4
+            longShortAdj = currentParams(8);  % grid_adj_4
+        end
+        
+        % Compute BAB weights using the updated parameters
+        lowBetaW  = computeSortWeights(monthlyBetas_mxwo_IS(m,:), nLongs, 0, 0);
+        highBetaW = computeSortWeights(monthlyBetas_mxwo_IS(m,:), nLongs, 0, 1);
+        longBeta  = sum(lowBetaW .* monthlyBetas_mxwo_IS(m,:), "omitnan");
+        shortBeta = sum(highBetaW .* monthlyBetas_mxwo_IS(m,:), "omitnan");
+        
+        babWeights(m,:) = leverage * ( (lowBetaW * longShortAdj) / longBeta - (highBetaW / longShortAdj) / shortBeta );
+        babReturns(m) = sum(monthlyXsReturns_country_IS(m,:) .* babWeights(m,:), 'omitnan');
+    end
+    
+    % Compute performance: annualized Sharpe ratio with turnover penalty
+    validReturns = babReturns(isfinite(babReturns));
+    currentSharpe = mean(validReturns) / std(validReturns) * sqrt(annualizationFactor);
+    
+    if nMonths_IS > 1
+        turnover = mean(sum(abs(diff(babWeights)), 2));
+        currentSharpe = currentSharpe - turnoverPenalty * turnover;
+    end
+    
+    % Update best parameters if a higher Sharpe is found
+    if currentSharpe > bestSharpe
+        bestSharpe = currentSharpe;
+        optimalParams = struct(...
+            'lev_VIXlt15', currentParams(1), 'adj_VIXlt15', currentParams(2), ...
+            'lev_VIX15to25', currentParams(3), 'adj_VIX15to25', currentParams(4), ...
+            'lev_VIX25to40', currentParams(5), 'adj_VIX25to40', currentParams(6), ...
+            'lev_VIXgt40', currentParams(7), 'adj_VIXgt40', currentParams(8), ...
+            'Sharpe', bestSharpe, 'Turnover', turnover);
+    end
+end
+
+fprintf('\n=== Optimal Parameters ===\n');
+fprintf('For VIX < %d:    Leverage = %.2f, Adj = %.2f\n', vixThresholds(1), optimalParams.lev_VIXlt15, optimalParams.adj_VIXlt15);
+fprintf('For VIX <= %d:   Leverage = %.2f, Adj = %.2f\n', vixThresholds(2), optimalParams.lev_VIX15to25, optimalParams.adj_VIX15to25);
+fprintf('For VIX <= %d:   Leverage = %.2f, Adj = %.2f\n', vixThresholds(3), optimalParams.lev_VIX25to40, optimalParams.adj_VIX25to40);
+fprintf('For VIX > %d:    Leverage = %.2f, Adj = %.2f\n', vixThresholds(3), optimalParams.lev_VIXgt40, optimalParams.adj_VIXgt40);
+fprintf('Optimal Sharpe: %.4f\n', optimalParams.Sharpe);
+
+
+%% ===== 1. PARAMETER OPTIMIZATION (Refined) =====
+% Define tighter parameter grids around your successful manual values
+leverageGrid = {1.4:0.1:1.6,    % VIX <15 (your value: 1.5)
+                0.9:0.1:1.1,     % 15≤VIX≤25 (your value: 1.0)
+                0.4:0.1:0.6,     % 25<VIX≤40 (your value: 0.5)
+                0.0:0.1:0.2};    % VIX>40 (your value: 0.0)
+
+adjGrid = {0.9:0.1:1.1,      % VIX<15 (your value: 1.0)
+           1.0:0.1:1.2,      % 15≤VIX≤25 (your value: 1.1)
+           0.9:0.1:1.1,      % 25<VIX≤40 (your value: 1.0)
+           1.3:0.1:1.5};     % VIX>40 (your value: 1.4)
+
+% Generate all combinations
+[lev1, adj1, lev2, adj2, lev3, adj3, lev4, adj4] = ...
+    ndgrid(leverageGrid{1}, adjGrid{1}, ...
+           leverageGrid{2}, adjGrid{2}, ...
+           leverageGrid{3}, adjGrid{3}, ...
+           leverageGrid{4}, adjGrid{4});
+combinations = [lev1(:), adj1(:), lev2(:), adj2(:), lev3(:), adj3(:), lev4(:), adj4(:)];
+
+% Optimization with turnover penalty
+bestSharpe = -Inf;
+optimalParams = struct();
+turnoverPenalty = 0.1; % Adjust based on your trading constraints
+
+for i = 1:size(combinations,1)
+    currentParams = combinations(i,:);
+    babWeights = zeros(nMonths_IS, nAssets);
+    babReturns = zeros(nMonths_IS, 1);
+    
+    for m = 1:nMonths_IS
+        currentVIX = vix(lastDayList(m + firstMonth - 1));
+        
+        % Parameter selection
+        if currentVIX < vixThresholds(1)
+            leverage = currentParams(1);
+            adj = currentParams(2);
+        elseif currentVIX <= vixThresholds(2)
+            leverage = currentParams(3);
+            adj = currentParams(4);
+        elseif currentVIX <= vixThresholds(3)
+            leverage = currentParams(5);
+            adj = currentParams(6);
+        else
+            leverage = currentParams(7);
+            adj = currentParams(8);
+        end
+        
+        % Compute BAB weights
+        lowBetaW = computeSortWeights(monthlyBetas_mxwo_IS(m,:), nLongs, 0, 0);
+        highBetaW = computeSortWeights(monthlyBetas_mxwo_IS(m,:), nLongs, 0, 1);
+        
+        longBeta = sum(lowBetaW .* monthlyBetas_mxwo_IS(m,:), "omitnan");
+        shortBeta = sum(highBetaW .* monthlyBetas_mxwo_IS(m,:), "omitnan");
+        
+        babWeights(m,:) = leverage * ((lowBetaW * adj)/longBeta - (highBetaW / adj)/shortBeta);
+        
+        % Store returns
+        babReturns(m) = sum(monthlyXsReturns_country_IS(m,:) .* babWeights(m,:), 'omitnan');
+    end
+    
+    % Calculate performance with turnover penalty
+    validReturns = babReturns(isfinite(babReturns));
+    currentSharpe = mean(validReturns)/std(validReturns) * sqrt(annualizationFactor);
+    
+    % Calculate turnover (absolute weight changes)
+    if size(babWeights,1) > 1
+        turnover = mean(sum(abs(diff(babWeights)), 2));
+        currentSharpe = currentSharpe - turnoverPenalty * turnover;
+    end
+    
+    % Update best parameters
+    if currentSharpe > bestSharpe
+        bestSharpe = currentSharpe;
+        optimalParams = struct(...
+            'lev_VIXlt15', currentParams(1), 'adj_VIXlt15', currentParams(2),...
+            'lev_VIX15to25', currentParams(3), 'adj_VIX15to25', currentParams(4),...
+            'lev_VIX25to40', currentParams(5), 'adj_VIX25to40', currentParams(6),...
+            'lev_VIXgt40', currentParams(7), 'adj_VIXgt40', currentParams(8),...
+            'Sharpe', bestSharpe, 'Turnover', turnover);
+    end
+end
+
+% ===== 2. CUMULATIVE RETURNS COMPARISON =====
+% Original BAB strategy
+originalBAB = sum(monthlyXsReturns_country_IS .* marketNeutralWeights_mxwo_IS, 2);
+
+% Your manual BAB strategy
+manualBAB = zeros(nMonths_IS, 1);
+manualWeights = zeros(nMonths_IS, nAssets);
+for m = 1:nMonths_IS
+    currentVIX = vix(lastDayList(m + firstMonth - 1));
+    
+    if currentVIX < vixThresholds(1)
+        leverage = 1.5;
+        longShortAdj = 1.0;
+    elseif currentVIX <= vixThresholds(2)
+        leverage = 1.0;
+        longShortAdj = 1.1;
+    elseif currentVIX <= vixThresholds(3)
+        leverage = 0.5;
+        longShortAdj = 1.0;
+    else
+        leverage = 0.0;
+        longShortAdj = 1.4;
+    end
+    
+    lowBetaW = computeSortWeights(monthlyBetas_mxwo_IS(m,:), nLongs, 0, 0);
+    highBetaW = computeSortWeights(monthlyBetas_mxwo_IS(m,:), nLongs, 0, 1);
+    
+    longBeta = sum(lowBetaW .* monthlyBetas_mxwo_IS(m,:), "omitnan");
+    shortBeta = sum(highBetaW .* monthlyBetas_mxwo_IS(m,:), "omitnan");
+    
+    manualWeights(m,:) = leverage * ((lowBetaW * longShortAdj)/longBeta - (highBetaW / longShortAdj)/shortBeta);
+    manualBAB(m) = sum(monthlyXsReturns_country_IS(m,:) .* manualWeights(m,:), 'omitnan');
+end
+
+% Optimized BAB strategy
+optimizedBAB = zeros(nMonths_IS, 1);
+optimizedWeights = zeros(nMonths_IS, nAssets);
+for m = 1:nMonths_IS
+    currentVIX = vix(lastDayList(m + firstMonth - 1));
+    
+    if currentVIX < vixThresholds(1)
+        leverage = optimalParams.lev_VIXlt15;
+        adj = optimalParams.adj_VIXlt15;
+    elseif currentVIX <= vixThresholds(2)
+        leverage = optimalParams.lev_VIX15to25;
+        adj = optimalParams.adj_VIX15to25;
+    elseif currentVIX <= vixThresholds(3)
+        leverage = optimalParams.lev_VIX25to40;
+        adj = optimalParams.adj_VIX25to40;
+    else
+        leverage = optimalParams.lev_VIXgt40;
+        adj = optimalParams.adj_VIXgt40;
+    end
+    
+    lowBetaW = computeSortWeights(monthlyBetas_mxwo_IS(m,:), nLongs, 0, 0);
+    highBetaW = computeSortWeights(monthlyBetas_mxwo_IS(m,:), nLongs, 0, 1);
+    
+    longBeta = sum(lowBetaW .* monthlyBetas_mxwo_IS(m,:), "omitnan");
+    shortBeta = sum(highBetaW .* monthlyBetas_mxwo_IS(m,:), "omitnan");
+    
+    optimizedWeights(m,:) = leverage * ((lowBetaW * adj)/longBeta - (highBetaW / adj)/shortBeta);
+    optimizedBAB(m) = sum(monthlyXsReturns_country_IS(m,:) .* optimizedWeights(m,:), 'omitnan');
+end
+
+% ===== 3. VISUALIZATION & METRICS =====
+% Cumulative returns
+cumOriginal = cumprod(1 + originalBAB);
+cumManual = cumprod(1 + manualBAB);
+cumOptimized = cumprod(1 + optimizedBAB);
+
+figure('Position', [100, 100, 900, 600]);
+plot(monthlyDates_IS, cumOriginal, 'k-', 'LineWidth', 1.5); hold on;
+plot(monthlyDates_IS, cumManual, 'b--', 'LineWidth', 2);
+plot(monthlyDates_IS, cumOptimized, 'r:', 'LineWidth', 2.5);
+title('BAB Strategy Cumulative Returns Comparison', 'FontSize', 14);
+xlabel('Date'); ylabel('Cumulative Return');
+legend({'Original BAB', 'Manual Adjusted BAB', 'Optimized BAB'}, 'Location', 'northwest');
+grid on; 
+set(gca, 'YScale', 'log');
+datetick('x', 'yyyy', 'keeplimits');
+
+% Performance metrics table
+metrics = table();
+metrics.Strategy = {'Original'; 'Manual'; 'Optimized'};
+metrics.AnnualizedReturn = [mean(originalBAB)*annualizationFactor; 
+                          mean(manualBAB)*annualizationFactor;
+                          mean(optimizedBAB)*annualizationFactor];
+metrics.Volatility = [std(originalBAB)*sqrt(annualizationFactor);
+                     std(manualBAB)*sqrt(annualizationFactor);
+                     std(optimizedBAB)*sqrt(annualizationFactor)];
+metrics.SharpeRatio = metrics.AnnualizedReturn ./ metrics.Volatility;
+metrics.MaxDrawdown = [maxdrawdown(cumOriginal);
+                      maxdrawdown(cumManual);
+                      maxdrawdown(cumOptimized)];
+metrics.Turnover = [mean(sum(abs(diff(marketNeutralWeights_mxwo_IS)),2));
+                   mean(sum(abs(diff(manualWeights)),2));
+                   mean(sum(abs(diff(optimizedWeights)),2))];
+
+disp('=== Performance Comparison ===');
+disp(metrics);
+
+% ===== 4. WALK-FORWARD VALIDATION =====
+% Split data into training (70%) and validation (30%) sets
+trainRatio = 0.7;
+nTrain = floor(nMonths_IS * trainRatio);
+trainDates = monthlyDates_IS(1:nTrain);
+valDates = monthlyDates_IS(nTrain+1:end);
+
+% Re-run optimization on training set only
+% [Same optimization code as above, but using trainDates]
+% Then test on validation set
+
+% ===== 5. PARAMETER STABILITY CHECK =====
+% Plot parameter values over time
+figure;
+subplot(2,1,1);
+plot(monthlyDates_IS, vix(lastDayList(firstMonth:firstMonth+nMonths_IS-1)));
+title('VIX Level Over Time');
+ylabel('VIX'); grid on;
+
+subplot(2,1,2);
+hold on;
+plot(monthlyDates_IS, manualWeights*0 + 1, 'k--'); % Reference line
+plot(monthlyDates_IS, sum(abs(manualWeights), 2), 'b');
+plot(monthlyDates_IS, sum(abs(optimizedWeights), 2), 'r');
+title('Portfolio Leverage Over Time');
+ylabel('Gross Exposure'); 
+legend({'No Leverage', 'Manual', 'Optimized'}, 'Location', 'northwest');
+grid on;
+
+% ===== CONSISTENT HEATMAP USING OPTIMIZATION FRAMEWORK =====
+% Use the SAME Sharpe calculation as in optimization
+annualizationFactor = 12; % Must match your optimization code
+
+% Define parameter ranges based on your optimization results
+vixThresholdsList = {[12 22 35],    % Test wider range around optimal
+                     [15 25 40],    % Your original thresholds
+                     [18 28 45]};   % Test higher range
+
+adjFactors = 0.7:0.1:1.5;          % Focus around your successful manual params
+
+% Initialize using the EXACT same return calculation
+heatmapData = zeros(length(vixThresholdsList), length(adjFactors));
+weightMats = cell(length(vixThresholdsList), length(adjFactors));
+
+% Reuse the leverage multipliers from optimization
+leverageMultipliers = [1.5, 1.0, 0.5, 0.0]; 
+
+for v = 1:length(vixThresholdsList)
+    currentThresholds = vixThresholdsList{v};
+    
+    for a = 1:length(adjFactors)
+        % Initialize with same weights calculation as optimization
+        babReturns = zeros(nMonths_IS, 1);
+        currentWeights = zeros(nMonths_IS, nAssets);
+        
+        for m = 1:nMonths_IS
+            currentVIX = vix(lastDayList(m + firstMonth - 1));
+            
+            % Apply EXACT same leverage rules as optimization
+            if currentVIX < currentThresholds(1)
+                leverage = leverageMultipliers(1);
+                adj = adjFactors(a) * 0.9; % Slight conservative adjustment
+            elseif currentVIX <= currentThresholds(2)
+                leverage = leverageMultipliers(2);
+                adj = adjFactors(a);
+            elseif currentVIX <= currentThresholds(3)
+                leverage = leverageMultipliers(3);
+                adj = adjFactors(a) * 1.1; % Slight aggressive adjustment
+            else
+                leverage = leverageMultipliers(4);
+                adj = adjFactors(a) * 1.3;
+            end
+            
+            % IDENTICAL weight calculation as optimization
+            lowBetaW = computeSortWeights(monthlyBetas_mxwo_IS(m,:), nLongs, 0, 0);
+            highBetaW = computeSortWeights(monthlyBetas_mxwo_IS(m,:), nLongs, 0, 1);
+            
+            longBeta = sum(lowBetaW .* monthlyBetas_mxwo_IS(m,:), "omitnan");
+            shortBeta = sum(highBetaW .* monthlyBetas_mxwo_IS(m,:), "omitnan");
+            
+            currentWeights(m,:) = leverage * ((lowBetaW * adj)/longBeta - (highBetaW / adj)/shortBeta);
+            babReturns(m) = sum(monthlyXsReturns_country_IS(m,:) .* currentWeights(m,:), 'omitnan');
+        end
+        
+        % IDENTICAL Sharpe calculation as optimization
+        validReturns = babReturns(isfinite(babReturns));
+        heatmapData(v,a) = mean(validReturns)/std(validReturns) * sqrt(annualizationFactor);
+        weightMats{v,a} = currentWeights; % Store weights for analysis
+    end
+end
+
+% ===== VALIDATION: COMPARE WITH OPTIMIZATION RESULTS =====
+% Get optimization results on same data
+optimizedSharpe = optimalParams.Sharpe; % From your optimization code
+
+% Find closest point in heatmap to optimization params
+optThresholds = [15 25 40]; % Your original thresholds
+optAdj = 1.1;              % Your manual adjustment
+
+[~, vIdx] = min(cellfun(@(x) sum(abs(x - optThresholds)), vixThresholdsList));
+[~, aIdx] = min(abs(adjFactors - optAdj));
+
+fprintf('\n=== Validation Results ===\n');
+fprintf('Optimization Sharpe: %.4f\n', optimizedSharpe);
+fprintf('Heatmap Sharpe at similar params: %.4f\n', heatmapData(vIdx,aIdx));
+fprintf('Discrepancy: %.4f\n', optimizedSharpe - heatmapData(vIdx,aIdx));
+
+% ===== ENHANCED HEATMAP VISUALIZATION =====
+figure('Position', [100, 100, 1400, 600]);
+
+% Create axis labels with threshold ranges
+yLabels = cell(length(vixThresholdsList),1);
+for v = 1:length(vixThresholdsList)
+    yLabels{v} = sprintf('%d-%d-%d', vixThresholdsList{v}(1), ...
+        vixThresholdsList{v}(2), vixThresholdsList{v}(3));
+end
+
+% Plot with consistent coloring
+h = heatmap(adjFactors, yLabels, heatmapData);
+h.Title = 'BAB Strategy Sharpe Ratio (Consistent with Optimization)';
+h.XLabel = 'Adjustment Factor (Long/Short Scaling)';
+h.YLabel = 'VIX Threshold Ranges [Low-Mid-High]';
+h.Colormap = turbo; % Better for visual perception
+h.ColorLimits = [min(heatmapData(:))*0.95, max(heatmapData(:))*1.05];
+h.FontSize = 12;
+
+% Add optimization marker
+hold on;
+plot(aIdx, vIdx, 'ro', 'MarkerSize', 12, 'LineWidth', 2);
+
+% ===== PARAMETER STABILITY ANALYSIS =====
+% Check weight changes across parameters
+weightChanges = cellfun(@(w) mean(sum(abs(diff(w)),2)), weightMats);
+turnoverRatios = weightChanges * tCost; % Incorporate your 10bp cost
+
+% Create performance net of costs
+netPerformance = heatmapData - turnoverRatios;
+
+figure;
+subplot(1,2,1);
+imagesc(adjFactors, 1:length(vixThresholdsList), heatmapData);
+set(gca, 'YTick', 1:length(vixThresholdsList), 'YTickLabel', yLabels);
+title('Gross Sharpe Ratios');
+colorbar;
+
+subplot(1,2,2);
+imagesc(adjFactors, 1:length(vixThresholdsList), netPerformance);
+set(gca, 'YTick', 1:length(vixThresholdsList), 'YTickLabel', yLabels);
+title('Net Sharpe (After 10bp Costs)');
+colorbar;
+
+% ===== FIND OPTIMAL AFTER COSTS =====
+[bestNetSharpe, bestNetIdx] = max(netPerformance(:));
+[bestV, bestA] = ind2sub(size(netPerformance), bestNetIdx);
+
+fprintf('\n=== Cost-Adjusted Optimal ===\n');
+fprintf('Thresholds: [%d %d %d]\n', vixThresholdsList{bestV});
+fprintf('Adj Factor: %.2f\n', adjFactors(bestA));
+fprintf('Net Sharpe: %.4f\n', bestNetSharpe);
+%% OUT OF SAMPLE RETURN COMPUTATION / PERF STATS / PLOT
+%oos betas
+monthlyBetas_country_OOS = monthlyBetas_mxwo(166:end,:);
+% oosample period split
+oosampleIdx = monthlyDates >= outSampleStart;
+monthlyDates_OOS              = monthlyDates(oosampleIdx);
+monthlyTotalReturns_country_OOS = monthlyTotalReturns_country(oosampleIdx, :);
+monthlyRf_OOS                = monthlyRf(oosampleIdx, :);
+monthlyXsReturns_country_OOS = monthlyXsReturns_country(oosampleIdx, :);
+monthlyFactors_OOS            = monthlyFactors(oosampleIdx, :);
+monthlyXsReturns_mxwo_OOS     = monthlyXsReturns_mxwo(oosampleIdx, :);
+
+equalWeights_mxwo_OOS         = equalWeights_mxwo(oosampleIdx, :);
+lowBetaWeights_mxwo_OOS       = lowBetaWeights_mxwo(oosampleIdx, :);
+highBetaWeights_mxwo_OOS     = highBetaWeights_mxwo(oosampleIdx, :);
+longShortWeights_mxwo_OOS     = longShortWeights_mxwo(oosampleIdx, :);
+marketNeutralWeights_mxwo_OOS = marketNeutralWeights_mxwo(oosampleIdx, :);
+benchmarkWeights_OOS          = benchmarkWeights(oosampleIdx, :);
+nMonths_OOS                   = sum(oosampleIdx);
+
+% Compute strategy returns without transaction costs. 
+% Working with excess returns is easier.
+nStrategies = 6
+%
+stratXsReturnsNoTC_msci_OOS = zeros(nMonths_OOS, nStrategies);
+stratXsReturnsNoTC_msci_OOS(:, 1) = sum(monthlyXsReturns_country_OOS .* equalWeights_mxwo_OOS, 2);
+stratXsReturnsNoTC_msci_OOS(:, 2) = sum(monthlyXsReturns_country_OOS .* lowBetaWeights_mxwo_OOS, 2);
+stratXsReturnsNoTC_msci_OOS(:, 3) = sum(monthlyXsReturns_country_OOS .* highBetaWeights_mxwo_OOS, 2);
+stratXsReturnsNoTC_msci_OOS(:, 4) = sum(monthlyXsReturns_country_OOS .* longShortWeights_mxwo_OOS, 2);
+stratXsReturnsNoTC_msci_OOS(:, 5) = sum(monthlyXsReturns_country_OOS .* marketNeutralWeights_mxwo_OOS, 2);
+stratXsReturnsNoTC_msci_OOS(:, 6) = sum(monthlyXsReturns_mxwo_OOS .* benchmarkWeights_OOS, 2);
+
+% Performance statistics (benchmark is the mxwo)
+strategyNames_mxwo_OSS = {'ew_mxwo', 'lowbeta_mxwo','highbeta_mxwo', 'longshort_mxwo', 'bab_mxwo', 'BENCHMARK'};
+summarizePerformance(stratXsReturnsNoTC_msci_OOS, monthlyRf_OOS, stratXsReturnsNoTC_msci_OOS(:, 1), annualizationFactor, strategyNames_mxwo_OSS, 'perf_mxwobeta_OOS');
+
+% plot code
+% EW ARE FOR BOTH COUNTRY AND MSCI THE SAME
+% Compute cumulative returns
+
+cum_returns_msci_OOS = cumprod(1 + stratXsReturnsNoTC_msci_OOS);
+
+% Define strategy names
+strategyNames_msci = {'EW MSCI', 'Low Beta MSCI', 'High Beta MSCI', 'Long-Short MSCI', 'Market Neutral MSCI', 'BENCHMARK'};
+
+% Define colors for better visibility
+colors = lines(length(strategyNames_msci)); % Use MATLAB's default color map for clarity
+
+% Open figure and hold
+figure;
+hold on;
+set(gcf, 'Position', [100, 100, 1200, 600]); % Adjust figure size
+
+% Plot MSCI-based strategies
+for i = 1:size(cum_returns_msci_IS, 2)
+    if i == 1
+        plot(monthlyDates_OOS, cum_returns_msci_OOS(:, i), '-', 'Color', colors(i, :), 'LineWidth', 2); % EW strategy solid
+    else
+        plot(monthlyDates_OOS, cum_returns_msci_OOS(:, i), '--', 'Color', colors(i, :), 'LineWidth', 1.5); % Others dashed
+    end
+end
+
+% Improve readability
+xlabel('Date', 'FontSize', 14, 'FontWeight', 'bold');
+ylabel('Cumulative Return', 'FontSize', 14, 'FontWeight', 'bold');
+title('Out-Of-Sample Cumulative Performance of MSCI-Based Strategies', 'FontSize', 16, 'FontWeight', 'bold');
+
+% Format y-axis (log-scale)
+set(gca, 'YScale', 'log', 'FontSize', 12);
+grid on;
+box on;
+
+% Improve tick formatting
+datetick('x', 'yyyy', 'keeplimits'); % Show years on x-axis
+
+% Legend settings
+legend(strategyNames_msci, 'Location', 'NorthWest', 'FontSize', 12, 'Box', 'off');
+
+% Finalize plot
+hold off;
