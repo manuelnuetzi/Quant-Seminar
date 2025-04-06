@@ -375,7 +375,7 @@ for i = 1:length(nLongs_grid)
         current_nShorts = nShorts_grid(j);
         
         % Preallocate strategy returns (shifted by 1 month)
-        nMonths_usable = nMonths_IS - 1;
+        nMonths_usable = nMonths - 1;
         ret_ew = zeros(nMonths_usable, 1);
         ret_lowbeta = zeros(nMonths_usable, 1);
         ret_highbeta = zeros(nMonths_usable, 1);
@@ -385,7 +385,7 @@ for i = 1:length(nLongs_grid)
         % Loop over months, ensuring no look-ahead
         for m = 1:nMonths_usable
             % Get current month's beta and non-missing assets
-            currentBeta = monthlyBetas_mxwo_IS(m, :);
+            currentBeta = monthlyBetas_mxwo(m, :);
             nonMissings = ~isnan(currentBeta);
             
             if sum(nonMissings) < current_nLongs
@@ -438,11 +438,11 @@ for i = 1:length(nLongs_grid)
             w_marketneutral = (w_low * longShort_Adj / longBeta) - (w_high / longShort_Adj / shortBeta);
             
             % --- Apply to NEXT month's returns ---
-            ret_ew(m) = sum(monthlyXsReturns_country_IS(m+1, :) .* w_ew);
-            ret_lowbeta(m) = sum(monthlyXsReturns_country_IS(m+1, :) .* w_low);
-            ret_highbeta(m) = sum(monthlyXsReturns_country_IS(m+1, :) .* w_high);
-            ret_longshort(m) = sum(monthlyXsReturns_country_IS(m+1, :) .* w_longshort);
-            ret_marketneutral(m) = sum(monthlyXsReturns_country_IS(m+1, :) .* w_marketneutral);
+            ret_ew(m) = sum(monthlyXsReturns_country(m+1, :) .* w_ew);
+            ret_lowbeta(m) = sum(monthlyXsReturns_country(m+1, :) .* w_low);
+            ret_highbeta(m) = sum(monthlyXsReturns_country(m+1, :) .* w_high);
+            ret_longshort(m) = sum(monthlyXsReturns_country(m+1, :) .* w_longshort);
+            ret_marketneutral(m) = sum(monthlyXsReturns_country(m+1, :) .* w_marketneutral);
         end
         
         % Compute Sharpe Ratios
