@@ -1,0 +1,693 @@
+% CountryLowBeta: Computes the returns from equally weighted and
+% beta-based portfolios on country ETFs
+
+
+% !!!!! FF Data Part doesnt work as we dont have aqr factors for
+% 2025, to be fixed later
+
+clc
+clear
+close all
+
+
+% Parameter selection
+% Annualization factor for monthly to annual
+annualizationFactor = 12;
+% Number of countries held long and short (nShorts is ignored in the
+% long-only versions)
+nLongs = 4;
+nShorts = 4;
+% Proportional transaction costs
+tCost = 0.001;
+% Trading lag in days
+lag = 1;
+% Beta computation lookback period in months. Note that we must use 59 and not 60 months here.
+lookbackStart = 59;
+
+% Load the data and extract the dates, riskless rate, and ETF prices
+data_country = readtable('merged_data.xlsx', 'Format', 'auto', 'TreatAsEmpty', {'#N/A N/A'});
+data_vix = readtable('VOLINDEX.xlsx', 'Format', 'auto', 'TreatAsEmpty', {'#N/A N/A'});
+data_mxwo = readtable('msciallworld.xlsx', 'Format', 'auto', 'TreatAsEmpty', {'#N/A N/A'});
+data_RF = readtable('Riskfree_USD3Month.xlsx', 'Format', 'auto', 'TreatAsEmpty', {'#N/A N/A'});
+
+% load factors
+% qmj and bab
+data_bab_qmj_umd= readtable('BAB_QMJ_UMD.xlsx', 'Format', 'auto', 'TreatAsEmpty', {'#N/A N/A'});
+%load ff5 factors
+data_ff5 = readtable('F-F-Research_Data_5_Factors_2x3.xlsx');
+data_ff5{:, 2:end} = data_ff5{:, 2:end} / 100;
+
+
+% Define the date formats 
+dateFormat = 'dd.MM.yyyy'; % For data_country and data_mxwo
+% Convert dates to datetime format
+data_country.Date = datetime(data_country.Date, 'InputFormat', dateFormat);
+data_RF.Date = datetime(data_RF.Date, 'InputFormat', dateFormat);
+data_vix.Date = datetime(data_vix.Date, 'InputFormat', dateFormat);
+data_mxwo.Date = datetime(data_mxwo.Date, 'InputFormat', dateFormat);
+data_bab_qmj_umd.Date = datetime(data_bab_qmj_umd.Date, 'InputFormat', 'MM/dd/yyyy'); % Adjust format if needed
+
+% Convert numeric YYYYMM to string and then to datetime (initially first day of month)
+data_ff5.Date = datetime(num2str(data_ff5.Date), 'InputFormat', 'yyyyMM', 'Format', 'yyyy-MM-dd');
+% Adjust to the last day of the respective month
+data_ff5.Date = dateshift(data_ff5.Date, 'end', 'month');
+
+% If dates load as datetimes, one can also use readtimetable instead of
+% readtable, then the table2timetable commands below can be skipped.
+data_country = table2timetable(data_country);
+data_vix = table2timetable(data_vix);
+data_mxwo = table2timetable(data_mxwo);
+data_bab_qmj_umd = table2timetable(data_bab_qmj_umd);
+data_ff5 = table2timetable(data_ff5);
+data_RF = table2timetable(data_RF);
+
+
+mergedTable = synchronize(data_country, data_vix, data_mxwo, data_RF, 'first');
+%%
+% sync factors
+mergedFactors_monthly = synchronize(data_bab_qmj_umd, data_ff5, 'first');
+
+% Generate arrays with the different variables matched to the previous sync before
+country_prices = table2array(mergedTable(:, 1 : 28));
+mxwo_prices = table2array(mergedTable(:, 30));
+vix = table2array(mergedTable(:, 29));
+Rf = table2array(mergedTable(:, 31))/100;
+
+%fill N/A values of vix values with previous
+vix = fillmissing(vix, 'previous');
+country_prices = fillmissing(country_prices,'previous');
+Rf = fillmissing(Rf,'previous');
+mxwo_prices = fillmissing(mxwo_prices,'previous');
+%%
+% Check for NaNs in each dataset
+missing_VIX = any(isnan(vix), 'all');
+missing_MXWO = any(isnan(mxwo_prices), 'all');
+missing_Rf = any(isnan(Rf), 'all');
+missing_country = any(isnan(country_prices), 'all');
+
+%%
+% Anzahl der Werte größer als xx (just for idea)
+num_values = sum(vix > 18);
+
+% Ergebnis anzeigen
+fprintf('Anzahl der Werte in VIX, die größer als xx sind: %d\n', num_values);
+%
+
+% create dates based on merged table
+dates = mergedTable.Date;
+
+% Size of the dataset
+nDays = length(dates)
+nAssets = width(country_prices)
+
+
+% Generate numeric dates in the format YYYYMMDD so that we can reuse 
+% the functions we developed previously. 
+datesYyyymmdd = yyyymmdd(dates);
+
+
+% Compute the return earned on the riskless asset on each trading day, accounting for
+% the number of calendar days until the next trading day. Shift the result
+% down by one day so that it represents the return accrued on that day
+dayCount = days(diff(dates));
+% create rfscaled
+RfScaled = zeros(nDays, 1);
+RfScaled(2 : end, 1) = Rf(1 : end - 1, 1) .* dayCount / 360;
+
+% Compute daily country returns
+countryreturns = zeros(nDays, nAssets);
+countryreturns(2 : end, :) = country_prices(2 : end, :) ./ country_prices(1 : end - 1, :) - 1;
+countryXsReturns = countryreturns - RfScaled;
+
+% Compute daily mxwo returns
+mxworeturns = zeros(nDays, 1);
+mxworeturns(2 : end, :) = mxwo_prices(2 : end, :) ./ mxwo_prices(1 : end - 1, :) - 1;
+% fundamental problem here: one might think we have to subtract a "world-weighted" risk free, but:
+%%%%%%%%%%%%%%% DELETE LATER %%%%%%%%%%%%%%%%%%%%%%%%
+% Im Folgenden soll aufgezeigt werden, dass dieser Ansatz als falsch zu erachten ist. Die Verwendung 
+% einer ländergewichteten Risk-Free-Rate bei der Berechnung der Excess-Returns für den MXWO ist 
+% aus zwei Gründen als falsch zu bewerten. Erstens erfolgt die Abbildung des MXWO in USD. Hieraus 
+% lässt sich unmittelbar ableiten, dass die Verwendung einer in USD gehandelten Risk-Free-Rate als 
+% sinnvoll erachtet werden kann. Der zweite Grund liegt in der Methodik und Konstruktion des 
+% MXWO. Im Rahmen der Berechnung des Indexpreises des MXWO erfolgt eine Differenzierung 
+% zwischen dem «Preis-Index-Level-USD» und dem «Preis-Index-Level-Local». Diese 
+% Unterscheidung wird vorgenommen, um Nicht-USD-Regionen in ihrer jeweiligen lokalen Währung 
+% zu messen. Der entscheidende Aspekt dieser Differenzierung ist die Anpassung der lokalen Währung. 
+% Die ermittelte Performance in lokaler Währung wird folglich in USD umgerechnet. Bei jeder 
+% Berechnung wird also der Wert, sei es das Preis-Index-Level oder die Marktkapitalisierung, in USD 
+% umgerechnet (MSCI (2024b, S. 6ff.)).  
+% Nachfolgend soll die Diskussion zur passenden Risk-Free-Rate für die Berechnung des Excess
+% Returns des MXWO endgültig klargestellt werden: Zinsen beziehen sich immer auf eine Währung. 
+% So kann beispielsweise eine Emerging-Markets-Aktie in Lokalwährung mit hohen Zinsen (ebenfalls 
+% in Lokalwährung) eine sehr hohe Rendite aufweisen. In der USD-Performance dieser Emerging
+% Markets-Aktie wird folglich der ökonomisch zu erwartende negative Umrechnungseffekt eine Rolle 
+% spielen. Dies kann anhand des Internationalen Fisher Effekts gezeigt werden (Madura (2016, S. 
+% 266ff.)). Die hohen Zinsen verschwinden somit ebenfalls über die Umrechnung in USD wieder. 
+% Folglich ist es nicht zulässig, eine USD-Performance einer Emerging-Markets-Aktie mit den lokalen 
+% Zinsen der Emerging-Markets-Aktie zu vergleichen.  
+% Nach dieser kurzen Diskussion lässt sich festhalten, dass für die Berechnung der Excess-Returns des 
+% MXWO ein Zinssatz herangezogen werden sollte, der in derselben Währung gehandelt wird wie der 
+% MXWO. Daher wird auch für die Berechnung des Excess-Returns des MXWO die 10 Jahres
+%%%%%%%%%%%%%% DELETE LATER %%%%%%%%%%%%%%%%
+
+% Treasury-Rate als Risk-Free-Rate verwendet.
+mxwoXsReturns = mxworeturns - RfScaled;
+
+
+% Compute cross-sectional average excess returns on the ETFs for beta estimation
+% market_country = The xsreturns of the cross sectional average of all countries
+market_country = mean(countryXsReturns, 2, "omitnan");
+% market_mxwo = The xsreturn of the MSCI All World Index
+market_mxwo = mxwoXsReturns;
+
+
+% beta construction 1: Obtain monthly beta estimates to construct portfolio weights
+% First, generate arrays listing the first and last day of each month
+[firstDayList, lastDayList] = getFirstAndLastDayInPeriod(datesYyyymmdd, 2);
+monthlyDates = dates(lastDayList);
+nMonths = length(firstDayList)
+monthlyBetas_country = zeros(nMonths, nAssets);
+% Second, estimate the betas using five-year trailing windows
+firstMonth = lookbackStart + 1;
+for m = firstMonth : nMonths
+    first = firstDayList(m - lookbackStart);
+    last = lastDayList(m) - lag;
+    X = [ones(last - first + 1, 1), market_country(first : last, 1)];
+    Y = countryXsReturns(first : last, :);
+    b = X \ Y;
+    monthlyBetas_country(m, :) = b(2, :);    
+end
+
+% beta construction 2: Obtain monthly beta estimates to construct portfolio weights
+% First, generate arrays listing the first and last day of each month
+[firstDayList, lastDayList] = getFirstAndLastDayInPeriod(datesYyyymmdd, 2);
+monthlyDates = dates(lastDayList);
+nMonths = length(firstDayList)
+monthlyBetas_mxwo = zeros(nMonths, nAssets);
+% Second, estimate the betas using five-year trailing windows
+firstMonth = lookbackStart + 1;
+for m = firstMonth : nMonths
+    first = firstDayList(m - lookbackStart);
+    last = lastDayList(m) - lag;
+    X = [ones(last - first + 1, 1), market_mxwo(first : last, 1)];
+    Y = countryXsReturns(first : last, :);
+    b = X \ Y;
+    monthlyBetas_mxwo(m, :) = b(2, :);    
+end
+
+%%
+% Construct the static portfolios weights for cross sectional betas
+equalWeights_country = zeros(nMonths, nAssets);
+lowBetaWeights_country = zeros(nMonths, nAssets);
+highBetaWeights_country = zeros(nMonths, nAssets);
+longShortWeights_country = zeros(nMonths, nAssets);
+marketNeutralWeights_country = zeros(nMonths, nAssets);
+
+for m = firstMonth : nMonths
+    % Equally weighted portfolio
+    nonMissings_country = isfinite(country_prices(lastDayList(m), :));
+    equalWeights_country(m, :) = nonMissings_country / sum(nonMissings_country);
+    
+    % Low-beta and high-beta portfolios, long only
+    % The only difference is the value of the longHighValues flag
+    lowBetaWeights_country(m, :) = computeSortWeights(monthlyBetas_country(m, :), nLongs, 0, 0);
+    highBetaWeights_country(m, :) = computeSortWeights(monthlyBetas_country(m, :), nLongs, 0, 1);
+    
+    % Long-short portfolio
+    longShortWeights_country(m, :) = computeSortWeights(monthlyBetas_country(m, :), nLongs, nShorts, 0);
+    
+    % Market-neutral strategy
+    % Start by estimating the betas of the long and short legs
+    longBeta_country = sum(lowBetaWeights_country(m, :) .* monthlyBetas_country(m, :), "omitnan");
+    shortBeta_country = sum(highBetaWeights_country(m, :) .* monthlyBetas_country(m, :), "omitnan");
+    % Then use them to rescale the long and short legs
+    marketNeutralWeights_country(m, :) = lowBetaWeights_country(m, :) / longBeta_country - highBetaWeights_country(m, :) / shortBeta_country;
+end
+
+% Construct the static portfolios weights for msci all world  betas
+equalWeights_mxwo = zeros(nMonths, nAssets);
+lowBetaWeights_mxwo = zeros(nMonths, nAssets);
+highBetaWeights_mxwo = zeros(nMonths, nAssets);
+longShortWeights_mxwo = zeros(nMonths, nAssets);
+marketNeutralWeights_mxwo = zeros(nMonths, nAssets);
+
+for m = firstMonth : nMonths
+    % Equally weighted portfolio
+    nonMissings_mxwo = isfinite(country_prices(lastDayList(m), :));
+    equalWeights_mxwo(m, :) = nonMissings_mxwo / sum(nonMissings_mxwo);
+    
+    % Low-beta and high-beta portfolios, long only
+    % The only difference is the value of the longHighValues flag
+    lowBetaWeights_mxwo(m, :) = computeSortWeights(monthlyBetas_mxwo(m, :), nLongs, 0, 0);
+    highBetaWeights_mxwo(m, :) = computeSortWeights(monthlyBetas_mxwo(m, :), nLongs, 0, 1);
+    
+    % Long-short portfolio
+    longShortWeights_mxwo(m, :) = computeSortWeights(monthlyBetas_mxwo(m, :), nLongs, nShorts, 0);
+    
+    % Market-neutral strategy
+    % Start by estimating the betas of the long and short legs
+    longBeta_mxwo = sum(lowBetaWeights_mxwo(m, :) .* monthlyBetas_mxwo(m, :), "omitnan");
+    shortBeta_mxwo = sum(highBetaWeights_mxwo(m, :) .* monthlyBetas_mxwo(m, :), "omitnan");
+    % Then use them to rescale the long and short legs
+    marketNeutralWeights_mxwo(m, :) = lowBetaWeights_mxwo(m, :) / longBeta_mxwo - highBetaWeights_mxwo(m, :) / shortBeta_mxwo;
+    % see if Beta is truly 0
+    portfolioBeta = sum(marketNeutralWeights_mxwo(m,:) .* monthlyBetas_mxwo(m,:), "omitnan");
+    assert(abs(portfolioBeta) < 1e-6, "Portfolio not market neutral!");
+end
+
+%
+% Compute monthly returns on the assets. 
+monthlyDayCount = days(diff(monthlyDates));
+% Same as: monthlyDayCount = days(monthlyDates(2 : end, 1) - monthlyDates(1 : end - 1, 1));
+% Note that we need to use the rates at month-end. Compounding RfScaled would be wrong.
+monthEndRf = Rf(lastDayList); 
+monthlyRf = zeros(nMonths, 1);
+monthlyRf(2 : end, 1) = monthEndRf(1 : end - 1, 1) .* monthlyDayCount / 360;
+% Now do the ETFs. To handle delistings that take place during the month, just replace NaNs with zeros.
+countryreturns(isnan(countryreturns)) = 0;
+monthlyTotalReturns_country = aggregateReturns(countryreturns, datesYyyymmdd, 2);
+monthlyXsReturns_country = monthlyTotalReturns_country - monthlyRf;
+
+%% doublecheck if factors match the monthly dates so we can drop the first months series in next step
+% Suppose monthlyDates is N×1 and mergedFactors_monthly has N rows as well.
+% As we only have FF5 Factors until End of 2024 we drop the last 3
+% monthlydates and do the regression only with data up to December 2024
+
+% 1) Check if they are the same length:
+if numel(monthlyDates) ~= height(mergedFactors_monthly)
+    error('They have different lengths, so they cannot match one-to-one.');
+end
+
+% 2) Compare year and month only:
+sameYearMonth = (year(monthlyDates) == year(mergedFactors_monthly.Date)) & ...
+                (month(monthlyDates) == month(mergedFactors_monthly.Date));
+
+% 3) Check if all match:
+if all(sameYearMonth)
+    disp('All monthlyDates match mergedFactors_monthly by year & month (ignoring day).');
+else
+    disp('Some entries do NOT match by year & month. See indices below:');
+    find(~sameYearMonth)
+end
+
+
+%% Drop firstMonth months from the arrays. In order to have weights and
+% returns in sync, one drops firstMonth months from the beginning of the 
+% return series, and (firstMonth - 1) months from the beginning and one  
+% month from the end of the portfolio weights series 
+monthlyDates = monthlyDates(firstMonth + 1 : end, 1);
+monthlyTotalReturns_country = monthlyTotalReturns_country(firstMonth + 1 : end, :);
+monthlyRf = monthlyRf(firstMonth + 1 : end, 1);
+monthlyXsReturns_country = monthlyXsReturns_country(firstMonth + 1 : end, :);
+monthlyFactors = mergedFactors_monthly(firstMonth + 1 : end, :);
+% extract factors to regular array
+monthlyFactorsArray = table2array(monthlyFactors(:, 1:8));
+% weights based on country beta
+equalWeights_country = equalWeights_country(firstMonth : end - 1, :);
+lowBetaWeights_country = lowBetaWeights_country(firstMonth : end - 1, :);
+highBetaWeights_country = highBetaWeights_country(firstMonth : end - 1, :);
+longShortWeights_country = longShortWeights_country(firstMonth : end - 1, :);
+marketNeutralWeights_country = marketNeutralWeights_country(firstMonth : end - 1, :);
+% weights based on mxwo beta
+equalWeights_mxwo = equalWeights_mxwo(firstMonth : end - 1, :);
+lowBetaWeights_mxwo = lowBetaWeights_mxwo(firstMonth : end - 1, :);
+highBetaWeights_mxwo = highBetaWeights_mxwo(firstMonth : end - 1, :);
+longShortWeights_mxwo = longShortWeights_mxwo(firstMonth : end - 1, :);
+marketNeutralWeights_mxwo = marketNeutralWeights_mxwo(firstMonth : end - 1, :);
+% drop firstmonth
+nMonths = nMonths - firstMonth;
+%
+% Compute strategy returns without transaction costs. 
+% Working with excess returns is easier.
+nStrategies = 5
+stratXsReturnsNoTC_country = zeros(nMonths, nStrategies);
+stratXsReturnsNoTC_country(:, 1) = sum(monthlyXsReturns_country .* equalWeights_country, 2);
+stratXsReturnsNoTC_country(:, 2) = sum(monthlyXsReturns_country .* lowBetaWeights_country, 2);
+stratXsReturnsNoTC_country(:, 3) = sum(monthlyXsReturns_country .* highBetaWeights_country, 2);
+stratXsReturnsNoTC_country(:, 4) = sum(monthlyXsReturns_country .* longShortWeights_country, 2);
+stratXsReturnsNoTC_country(:, 5) = sum(monthlyXsReturns_country .* marketNeutralWeights_country, 2);
+
+
+%
+stratXsReturnsNoTC_msci = zeros(nMonths, nStrategies);
+stratXsReturnsNoTC_msci(:, 1) = sum(monthlyXsReturns_country .* equalWeights_mxwo, 2);
+stratXsReturnsNoTC_msci(:, 2) = sum(monthlyXsReturns_country .* lowBetaWeights_mxwo, 2);
+stratXsReturnsNoTC_msci(:, 3) = sum(monthlyXsReturns_country .* highBetaWeights_mxwo, 2);
+stratXsReturnsNoTC_msci(:, 4) = sum(monthlyXsReturns_country .* longShortWeights_mxwo, 2);
+stratXsReturnsNoTC_msci(:, 5) = sum(monthlyXsReturns_country .* marketNeutralWeights_mxwo, 2);
+
+
+% Performance statistics (benchmark is the crosssectional ew)
+strategyNames_country = {'ew_country', 'lowbeta_country', 'highbeta_country', 'longshort_country', 'bab_country'};
+summarizePerformance(stratXsReturnsNoTC_country, monthlyRf, stratXsReturnsNoTC_country(:, 1), annualizationFactor, strategyNames_country, 'perf_countrybeta');
+
+% Performance statistics (benchmark is the mxwo)
+strategyNames_mxwo = {'ew_mxwo', 'lowbeta_mxwo','highbeta_mxwo', 'longshort_mxwo', 'bab_mxwo'};
+summarizePerformance(stratXsReturnsNoTC_msci, monthlyRf, stratXsReturnsNoTC_msci(:, 1), annualizationFactor, strategyNames_mxwo, 'perf_mxwobeta');
+
+% plot code
+% EW ARE FOR BOTH COUNTRY AND MSCI THE SAME
+% Compute cumulative returns
+cum_returns_country = cumprod(1 + stratXsReturnsNoTC_country);
+cum_returns_msci = cumprod(1 + stratXsReturnsNoTC_msci);
+
+% Define strategy names
+strategyNames_country = {'ew\_country', 'lowbeta\_country', 'highbeta\_country', 'longshort\_country', 'bab\_country'};
+strategyNames_msci = {'ew\_mxwo', 'lowbeta\_mxwo', 'highbeta\_mxwo', 'longshort\_mxwo', 'bab\_mxwo'};
+
+% Define neon colors for better visibility
+colors = [  0.1  0.1  0.1;  % Cyan
+            1.0  0.0  1.0;  % Magenta
+            0.0  1.0  1.0;  % Yellow
+            0.0  1.0  0.5;  % Teal Green
+            1.0  0.5  0.0;  % Orange
+            0.1  0.1  0.1;  % Blue
+            1.0  0.0  1.0;  % Magenta
+            0.0  1.0  1.0;  % Yellow
+            0.0  1.0  0.5;  % Teal Green
+            1.0  0.5  0.0]; % Green
+
+% Plot cumulative returns
+figure;
+hold on;
+set(gcf, 'Position', [100, 100, 1200, 600]);
+
+% Plot country-based strategies
+for i = 1:size(cum_returns_country, 2)
+    plot(monthlyDates, cum_returns_country(:, i), 'Color', colors(i, :), 'LineWidth', 0.5);
+end
+
+% Plot MSCI-based strategies with dashed lines
+for i = 1:size(cum_returns_msci, 2)
+    plot(monthlyDates, cum_returns_msci(:, i), '--', 'Color', colors(i, :), 'LineWidth', 0.5); % **Ensure matching colors**
+end
+
+% Improve readability
+xlabel('Date', 'FontSize', 14, 'FontWeight', 'bold');
+ylabel('Cumulative Return', 'FontSize', 14, 'FontWeight', 'bold');
+title('Cumulative Performance of Strategies', 'FontSize', 16, 'FontWeight', 'bold');
+
+% **Remove dark mode settings** to keep the default white background
+set(gca, 'XColor', 'k', 'YColor', 'k'); % Black axis labels for clarity
+
+% Adjust legend
+legend([strategyNames_country, strategyNames_msci], 'Location', 'Best', 'TextColor', 'k', 'FontSize', 12);
+grid on;
+hold off;
+
+%% Factor Regression
+% Extract AQR and FF5 factors
+aqrFactors = monthlyFactorsArray(:, [1, 2, 3, 4]); % BAB, QMJ, UMD, Mkt_RF
+ff5Factors = monthlyFactorsArray(:, 4:8); % Mkt_RF, SMB, HML, RMW, CMA
+
+strategyNames_country4factors = {'ew_country', 'lowbeta_country', 'highbeta_country', 'longshort_country', 'bab_country'};
+strategyNames_msci4factors = {'ew_mxwo', 'lowbeta_mxwo', 'highbeta_mxwo', 'longshort_mxwo', 'bab_mxwo'};
+% Combine all strategies and their names
+allStrategies = [stratXsReturnsNoTC_country, stratXsReturnsNoTC_msci];
+strategyNames = [strategyNames_country4factors, strategyNames_msci4factors];
+
+% Initialize results cell array
+resultsCell = {};
+
+% Loop through each strategy
+for i = 1:size(allStrategies, 2)
+    strategyReturns = allStrategies(:, i);
+    strategyName = strategyNames{i};
+    
+    % AQR Regression (included Mkt_RF)
+    modelAQR = fitlm(aqrFactors, strategyReturns, 'VarNames', {'BAB','QMJ','UMD','Mkt_RF','Returns'});
+    coeffAQR = modelAQR.Coefficients;
+    rsqAQR = modelAQR.Rsquared.Adjusted;
+    
+    % FF5 Regression
+    modelFF5 = fitlm(ff5Factors, strategyReturns, 'VarNames', {'Mkt_RF','SMB','HML','RMW','CMA','Returns'});
+    coeffFF5 = modelFF5.Coefficients;
+    rsqFF5 = modelFF5.Rsquared.Adjusted;
+    
+    % Format coefficients with significance stars and t-stats
+    formatCoeff = @(c) sprintf('%.3f%s (%.2f)', c.Estimate, ...
+        stars(c.pValue), c.tStat);
+    
+    % AQR Coefficients
+    aqrIntercept = formatCoeff(coeffAQR('(Intercept)',:));
+    aqrBAB = formatCoeff(coeffAQR('BAB',:));
+    aqrQMJ = formatCoeff(coeffAQR('QMJ',:));
+    aqrUMD = formatCoeff(coeffAQR('UMD',:));
+    aqrMkt = formatCoeff(coeffAQR('Mkt_RF',:));
+    
+    % FF5 Coefficients
+    ff5Intercept = formatCoeff(coeffFF5('(Intercept)',:));
+    ff5Mkt = formatCoeff(coeffFF5('Mkt_RF',:));
+    ff5SMB = formatCoeff(coeffFF5('SMB',:));
+    ff5HML = formatCoeff(coeffFF5('HML',:));
+    ff5RMW = formatCoeff(coeffFF5('RMW',:));
+    ff5CMA = formatCoeff(coeffFF5('CMA',:));
+    
+    % Append to results
+    resultsCell(end+1,:) = {strategyName, aqrIntercept, aqrBAB, aqrQMJ, aqrUMD, aqrMkt, ...
+        sprintf('%.3f', rsqAQR), ff5Intercept, ff5Mkt, ff5SMB, ff5HML, ff5RMW, ff5CMA, ...
+        sprintf('%.3f', rsqFF5)};
+end
+
+% Create and display table
+varNames = {'Strategy','AQR_Alpha','AQR_BAB','AQR_QMJ','AQR_UMD','AQR_Mkt','AQR_R2',...
+    'FF5_Alpha','FF5_Mkt','FF5_SMB','FF5_HML','FF5_RMW','FF5_CMA','FF5_R2'};
+resultsTable = cell2table(resultsCell, 'VariableNames', varNames);
+disp(resultsTable);
+
+% Write to Excel file
+writetable(resultsTable, 'factor_regression_results.xlsx', 'Sheet', 'Results');
+
+
+%% Implement Transaction costs for whole Backtest period 
+% Compute strategy returns with transaction costs by subtracting
+% turnover times proportional transaction costs from the returns of each strategy. 
+turnover = zeros(nMonths, 10);
+for m = 1 : nMonths - 1
+    currentRf = monthlyRf(m, 1);
+    currentRet = monthlyTotalReturns_country(m, :);
+    turnover(m, 1) = computeTurnover(equalWeights_country(m, :), equalWeights_country(m + 1, :), currentRet, currentRf);
+    turnover(m, 2) = computeTurnover(lowBetaWeights_country(m, :), lowBetaWeights_country(m + 1, :), currentRet, currentRf); 
+    turnover(m, 3) = computeTurnover(highBetaWeights_country(m, :), highBetaWeights_country(m + 1, :), currentRet, currentRf);
+    turnover(m, 4) = computeTurnover(longShortWeights_country(m, :), longShortWeights_country(m + 1, :), currentRet, currentRf);
+    turnover(m, 5) = computeTurnover(marketNeutralWeights_country(m, :), marketNeutralWeights_country(m + 1, :), currentRet, currentRf);
+    turnover(m, 6) = computeTurnover(equalWeights_mxwo(m, :), equalWeights_mxwo(m + 1, :), currentRet, currentRf);
+    turnover(m, 7) = computeTurnover(lowBetaWeights_mxwo(m, :), lowBetaWeights_mxwo(m + 1, :), currentRet, currentRf); 
+    turnover(m, 8) = computeTurnover(highBetaWeights_mxwo(m, :), highBetaWeights_mxwo(m + 1, :), currentRet, currentRf);
+    turnover(m, 9) = computeTurnover(longShortWeights_mxwo(m, :), longShortWeights_mxwo(m + 1, :), currentRet, currentRf);
+    turnover(m, 10) = computeTurnover(marketNeutralWeights_mxwo(m, :), marketNeutralWeights_mxwo(m + 1, :), currentRet, currentRf);    
+end
+% This is splitting hair a little bit. We're adding the transactions in the initial month.
+turnover(1, 1) = turnover(1, 1) + sum(abs(equalWeights_country(1, :)));
+turnover(1, 2) = turnover(1, 2) + sum(abs(lowBetaWeights_country(1, :)));
+turnover(1, 3) = turnover(1, 3) + sum(abs(highBetaWeights_country(1, :))); 
+turnover(1, 4) = turnover(1, 4) + sum(abs(longShortWeights_country(1, :))); 
+turnover(1, 5) = turnover(1, 5) + sum(abs(marketNeutralWeights_country(1, :))); 
+turnover(1, 6) = turnover(1, 6) + sum(abs(equalWeights_mxwo(1, :))); 
+turnover(1, 7) = turnover(1, 7) + sum(abs(lowBetaWeights_mxwo(1, :))); 
+turnover(1, 8) = turnover(1, 8) + sum(abs(highBetaWeights_mxwo(1, :))); 
+turnover(1, 9) = turnover(1, 9) + sum(abs(longShortWeights_mxwo(1, :))); 
+turnover(1, 10) = turnover(1, 10) + sum(abs(marketNeutralWeights_mxwo(1, :))); 
+
+% 1:5 is based on country beta, 6:end is based on mxwo beta
+avgTurnover = mean(turnover)
+
+stratXsReturnsTC_country = stratXsReturnsNoTC_country - tCost * turnover(:,1:5);
+stratXsReturnsTC_msci = stratXsReturnsNoTC_msci - tCost * turnover(:,6:end);
+
+% Performance statistics (benchmark is the crosssectional ew)
+strategyNames_country = {'ew_country', 'lowbeta_country', 'highbeta_country', 'longshort_country', 'bab_country'};
+summarizePerformance(stratXsReturnsTC_country, monthlyRf, stratXsReturnsTC_country(:, 1), annualizationFactor, strategyNames_country, 'perf_countrybeta_withTC');
+
+% Performance statistics (benchmark is the mxwo)
+strategyNames_mxwo = {'ew_mxwo', 'lowbeta_mxwo','highbeta_mxwo', 'longshort_mxwo', 'bab_mxwo'};
+summarizePerformance(stratXsReturnsTC_msci, monthlyRf, stratXsReturnsTC_msci(:, 1), annualizationFactor, strategyNames_mxwo, 'perf_mxwobeta_withTC');
+
+% Plot with tc
+% Compute cumulative returns for with-TC if not already done
+cum_returnsTC_country = cumprod(1 + stratXsReturnsTC_country);
+cum_returnsTC_msci    = cumprod(1 + stratXsReturnsTC_msci);
+
+% Define colors for each of the 5 strategies
+% For country-based strategies
+colors_country = lines(5);   % or any Nx3 colormap for 5 distinct colors
+
+% For MSCI-based strategies
+colors_msci = lines(5);      % separate colormap so it’s easy to differentiate
+% If you want them to share exactly the same color scheme, 
+% you could reuse `colors_country`.
+
+% Plot
+figure;
+set(gcf, 'Position', [100 100 1000 700]);  % optional resizing
+
+% --- Subplot #1: Country strategies
+subplot(2,1,1);
+hold on;
+for i = 1:size(cum_returns_country, 2)
+    % Plot the no‐TC line (solid)
+    plot(monthlyDates, cum_returns_country(:, i), ...
+        'LineWidth', 0.5, 'Color', colors_country(i, :));
+    % Plot the with‐TC line (dashed), same color
+    plot(monthlyDates, cum_returnsTC_country(:, i), ...
+        '--', 'LineWidth', 0.5, 'Color', colors_country(i, :));
+end
+title('Country Strategies: No TC (solid) vs. With TC (dashed)');
+xlabel('Date'); 
+ylabel('Cumulative Return');
+legend({...
+    'ew\_country (NoTC)', 'ew\_country (TC)', ...
+    'lowbeta\_country (NoTC)', 'lowbeta\_country (TC)', ...
+    'highbeta\_country (NoTC)', 'highbeta\_country (TC)', ...
+    'longshort\_country (NoTC)', 'longshort\_country (TC)', ...
+    'bab\_country (NoTC)', 'bab\_country (TC)'}, ...
+    'Location','best');
+grid on;
+hold off;
+
+% --- Subplot #2: MSCI strategies
+subplot(2,1,2);
+hold on;
+for i = 1:size(cum_returns_msci, 2)
+    % Plot the no‐TC line (solid)
+    plot(monthlyDates, cum_returns_msci(:, i), ...
+        'LineWidth', 0.5, 'Color', colors_msci(i, :));
+    % Plot the with‐TC line (dashed), same color
+    plot(monthlyDates, cum_returnsTC_msci(:, i), ...
+        '--', 'LineWidth', 0.5, 'Color', colors_msci(i, :));
+end
+title('MSCI Strategies: No TC (solid) vs. With TC (dashed)');
+xlabel('Date'); 
+ylabel('Cumulative Return');
+legend({...
+    'ew\_mxwo (NoTC)', 'ew\_mxwo (TC)', ...
+    'lowbeta\_mxwo (NoTC)', 'lowbeta\_mxwo (TC)', ...
+    'highbeta\_mxwo (NoTC)', 'highbeta\_mxwo (TC)', ...
+    'longshort\_mxwo (NoTC)', 'longshort\_mxwo (TC)', ...
+    'bab\_mxwo (NoTC)', 'bab\_mxwo (TC)'}, ...
+    'Location','best');
+grid on;
+hold off;
+
+
+
+%% Heatmap for robustness check
+
+% just for mxwo Beta as we use this to go further
+
+nLongs_grid = 1:8;
+nShorts_grid = 1:8;
+
+% Preallocate matrices for Sharpe ratios
+sharpe_ew = zeros(length(nLongs_grid), length(nShorts_grid));
+sharpe_lowbeta = zeros(length(nLongs_grid), length(nShorts_grid));
+sharpe_highbeta = zeros(length(nLongs_grid), length(nShorts_grid));
+sharpe_longshort = zeros(length(nLongs_grid), length(nShorts_grid));
+sharpe_marketneutral = zeros(length(nLongs_grid), length(nShorts_grid));
+
+% Loop over grid values
+for i = 1:length(nLongs_grid)
+    for j = 1:length(nShorts_grid)
+        current_nLongs = nLongs_grid(i);
+        current_nShorts = nShorts_grid(j);
+        
+        % Preallocate strategy returns (shifted by 1 month)
+        nMonths_usable = nMonths - 1;
+        ret_ew = zeros(nMonths_usable, 1);
+        ret_lowbeta = zeros(nMonths_usable, 1);
+        ret_highbeta = zeros(nMonths_usable, 1);
+        ret_longshort = zeros(nMonths_usable, 1);
+        ret_marketneutral = zeros(nMonths_usable, 1);
+        
+        % Loop over months, ensuring no look-ahead
+        for m = 1:nMonths_usable
+            % Get current month's beta and non-missing assets
+            currentBeta = monthlyBetas_mxwo(m, :);
+            nonMissings = ~isnan(currentBeta);
+            
+            if sum(nonMissings) < current_nLongs
+                continue; % Skip if not enough valid assets
+            end
+            
+            % --- Compute base weights for next month's returns ---
+            % Equal-weighted
+            w_ew = nonMissings / sum(nonMissings);
+            
+            % Low-beta (ascending sort)
+            w_low = computeSortWeights(currentBeta, current_nLongs, 0, 0);
+            
+            % High-beta (descending sort)
+            w_high = computeSortWeights(currentBeta, current_nLongs, 0, 1);
+            
+            % Long-short
+            w_longshort = computeSortWeights(currentBeta, current_nLongs, current_nShorts, 0);
+            
+            % Market-neutral
+            longBeta = sum(w_low .* currentBeta, 'omitnan');
+            shortBeta = sum(w_high .* currentBeta, 'omitnan');
+            if shortBeta == 0 || longBeta == 0
+                continue; % Avoid divide by zero
+            end
+            w_marketneutral = (w_low / longBeta) - (w_high / shortBeta);
+            
+          
+            
+            % --- Apply to NEXT month's returns ---
+            ret_ew(m) = sum(monthlyXsReturns_country(m+1, :) .* w_ew);
+            ret_lowbeta(m) = sum(monthlyXsReturns_country(m+1, :) .* w_low);
+            ret_highbeta(m) = sum(monthlyXsReturns_country(m+1, :) .* w_high);
+            ret_longshort(m) = sum(monthlyXsReturns_country(m+1, :) .* w_longshort);
+            ret_marketneutral(m) = sum(monthlyXsReturns_country(m+1, :) .* w_marketneutral);
+        end
+        
+        % Compute Sharpe Ratios
+        annualizedReturn = @(x) mean(x, 'omitnan') * annualizationFactor;
+        annualizedVol = @(x) std(x, 'omitnan') * sqrt(annualizationFactor);
+        
+        % Ensure no NaN Sharpe Ratios
+        sharpe_ew(i,j) = annualizedReturn(ret_ew) / max(annualizedVol(ret_ew), 1e-6);
+        sharpe_lowbeta(i,j) = annualizedReturn(ret_lowbeta) / max(annualizedVol(ret_lowbeta), 1e-6);
+        sharpe_highbeta(i,j) = annualizedReturn(ret_highbeta) / max(annualizedVol(ret_highbeta), 1e-6);
+        sharpe_longshort(i,j) = annualizedReturn(ret_longshort) / max(annualizedVol(ret_longshort), 1e-6);
+        sharpe_marketneutral(i,j) = annualizedReturn(ret_marketneutral) / max(annualizedVol(ret_marketneutral), 1e-6);
+    end
+end
+
+% plot
+
+figure;
+tiledlayout(2, 3);
+
+% Get global color limits for consistency
+all_sharpes = [sharpe_ew(:); sharpe_lowbeta(:); sharpe_highbeta(:); 
+               sharpe_longshort(:); sharpe_marketneutral(:)];
+clim = [min(all_sharpes), max(all_sharpes)];
+
+% Define strategies and their data
+strategies = {
+    'Equal Weighted',       sharpe_ew;
+    'Low Beta',            sharpe_lowbeta;
+    'High Beta',           sharpe_highbeta;
+    'Long-Short',          sharpe_longshort;
+    'Market Neutral',      sharpe_marketneutral;
+};
+
+% Plot each heatmap
+for i = 1:size(strategies, 1)
+    nexttile;
+    h = heatmap(nShorts_grid, nLongs_grid, strategies{i,2}, 'Colormap', parula);
+    h.ColorLimits = clim;
+    title(strategies{i,1});
+    xlabel('nShorts');
+    ylabel('nLongs');
+    
+    % Format cell text to 1 decimal place
+    h.CellLabelFormat = '%.2f'; 
+end
+
+% Adjust figure
+sgtitle('Sharpe Ratios (1 Decimal Place)', 'FontSize', 14, 'FontWeight', 'bold');
+set(gcf, 'Position', [100, 100, 1200, 800]);
+
+
+
