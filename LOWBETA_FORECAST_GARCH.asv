@@ -160,7 +160,7 @@ for m = firstMonth : nMonths
 end
 
 
-%% Weight calculation with GARCH-based VIX forecasting
+%% Weight calculation with GARCH-based volatility forecasting
 % VIX thresholds and leverage multipliers
 vixThresholds = [15, 28, 40];
 leverageMultipliers = [1.5, 1.0, 0.5, 0.0]; % [VIX <15, 15≤VIX≤25, 25<VIX≤40, VIX>40]
@@ -174,10 +174,15 @@ marketNeutralWeights_mxwo = zeros(nMonths, nAssets);
 
 % Initialize vectors
 leverage_History = zeros(nMonths, 1);
-longShortAdj = zeros(nMonths, 1);
+longShortAdj = ones(nMonths, 1); % Initialize to 1
 vixMonthly = vix(lastDayList);
+vixDaily = vix;
 VIXforecast_table = zeros(nMonths,1);
 ModelUsed = repmat("", nMonths, 1); % Track which model was used
+
+minDays = 30; % Minimum days required for GARCH estimation
+sigmaForecasts_mxwo = NaN(nMonths, size(country_prices, 2));
+portfolioVolatility = NaN(nMonths, 1);
 
 for m = firstMonth:nMonths
     % Portfolio weights calculation
@@ -188,70 +193,87 @@ for m = firstMonth:nMonths
     highBetaWeights_mxwo(m,:) = computeSortWeights(monthlyBetas_mxwo(m,:), nLongs, 0, 1);
     
     %% --- GARCH Forecasting Block ---
-    if m > firstMonth
-        historicalVIX = vix(firstMonth:m-1);
+    try
+        % Get daily returns for all valid countries up to current month
+        currentDate = monthlyDates(m);
+        validCountries = find(nonMissings_mxwo);
+        sigmaForecasts = zeros(nMonths, numel(validCountries));
         
-        try
-            % Convert to log returns for GARCH modeling
-            returns = diff(log(historicalVIX));
-            
-            % GJR-GARCH model specification (accounts for asymmetric volatility)
-            if license('test','financial_toolbox')
-                model = gjr('GARCHLags',1,'ARCHLags',1,'LeverageLags',1);
-                fit = estimate(model, returns, 'Display', 'off');
+        
+        for i = 1:numel(validCountries)
+            countryIdx = validCountries(i);
+            % Extract daily prices for this country up to current month 
+            countryPrices = country_prices(1:lastDayList(m), countryIdx);
+            % Compute log returns (skip NaN/inf)
+            validPrices = countryPrices(isfinite(countryPrices));
+
+            % only procede if enough datapoints (30 days) available to get
+            % good estimate
+            if length(validPrices) >= minDays
+                returns = diff(log(validPrices));
                 
-                % Correct GARCH forecasting syntax
-                [sigmaForecast, ~] = forecast(fit, 1, returns);
-                
-                % Convert back to VIX forecast
-                garchForecast = historicalVIX(end) * exp(sigmaForecast);
-                currentForecast = garchForecast;
-                ModelUsed(m) = "GJR-GARCH";
-            else
-                error('Financial Toolbox not available');
-            end
-        catch
-            % Fallback 1: ARIMA model
-            try
-                model = arima(1,1,1);
-                fit = estimate(model, historicalVIX, 'Display', 'off');
-                [forecastVIX, ~, ~] = forecast(fit, 1, 'Y0', historicalVIX);
-                currentForecast = forecastVIX(end);
-                ModelUsed(m) = "ARIMA";
-            catch
-                % Fallback 2: Exponential Weighted Moving Average
-                alpha = 0.3;
-                if m > firstMonth+1
-                    ewma = alpha*historicalVIX(end) + (1-alpha)*VIXforecast_table(m-1);
+                % GJR-GARCH estimation (1,1)
+                % 1 lag for GARCH term (persistence).
+                % 1 lag for ARCH term (shock impact).
+                % 1 lag for leverage effect (asymmetric response to negative returns).
+                % sigmaForecast = prediction of next day conditional
+                % volatility
+                if license('test','financial_toolbox')
+                    model = gjr('GARCHLags',1,'ARCHLags',1,'LeverageLags',1);
+                    fit = estimate(model, returns, 'Display', 'off');
+                    [sigmaForecast] = forecast(fit, 1, returns);
+                    sigmaForecasts(m,i) = sqrt(sigmaForecast);
+                    sigmaForecasts_mxwo(m, validCountries) = sigmaForecasts(m, :);
                 else
-                    ewma = historicalVIX(end);
+                    error('Financial Toolbox not available');
                 end
-                currentForecast = ewma;
-                ModelUsed(m) = "EWMA";
+            else
+                % Fallback to simple historical volatility if insufficient data
+                sigmaForecasts(m,i) = std(diff(log(validPrices)), 'omitnan');
             end
         end
-    else
-        % First month - no history available
-        currentForecast = vixMonthly(firstMonth);
-        ModelUsed(m) = "Initial Value";
+        
+        % Compute weighted portfolio volatility forecast (annualized)
+        weights = equalWeights_mxwo(m, validCountries);
+        portfolioVol = sqrt(252) * sum(weights .* sigmaForecasts(m)) * 100
+        portfolioVolatility(m) = portfolioVol;
+        ModelUsed(m) = "GJR-GARCH";
+        
+    catch
+        % Fallback to EWMA if GARCH fails
+        if m > firstMonth
+            alpha = 0.3;
+            % Compute simple historical volatility for all countries
+            histVols = zeros(1, sum(nonMissings_mxwo));
+            for i = 1:numel(validCountries)
+                countryIdx = validCountries(i);
+                returns = diff(log(country_prices(1:lastDayList(m), countryIdx)));
+                histVols(i) = std(returns, 'omitnan');
+            end
+            currentHistVol = sqrt(252) * sum(equalWeights_mxwo(m, validCountries) .* histVols);
+            
+            portfolioVol = alpha*currentHistVol + (1-alpha)*VIXforecast_table(m-1);
+        else
+            portfolioVol = vixMonthly(firstMonth); % Initial fallback
+
+        end
+        ModelUsed(m) = "EWMA";
     end
     
-    VIXforecast_table(m) = currentForecast;
+    % Store forecast
+    VIXforecast_table(m) = portfolioVol;
+    vixCurrent = vixMonthly(m);
     
     %% --- Leverage Adjustment ---
-    % (Rest of your existing leverage adjustment code remains the same)
-    if currentForecast < vixThresholds(1)
-        leverage_History(m) = leverageMultipliers(1);
-        longShortAdj(m) = 1;
-    elseif currentForecast <= vixThresholds(2)
-        leverage_History(m) = leverageMultipliers(2);
-        longShortAdj(m) = 1.1;
-    elseif currentForecast <= vixThresholds(3)
-        leverage_History(m) = leverageMultipliers(3);
-        longShortAdj(m) = 1;
+    if portfolioVol < vixThresholds(1) && vixCurrent < vixThresholds(1)
+        leverage_History(m) = leverageMultipliers(1);  % High leverage
+        longShortAdj(m) = 1.0;
+    elseif portfolioVol > vixThresholds(3) || vixCurrent > vixThresholds(3)
+        leverage_History(m) = leverageMultipliers(4);  % Low leverage
+        longShortAdj(m) = 1.4;  % More defensive
     else
-        leverage_History(m) = leverageMultipliers(4);
-        longShortAdj(m) = 1.4;
+        leverage_History(m) = leverageMultipliers(2);  % Neutral leverage
+        longShortAdj(m) = 1.1;
     end
     
     % Apply leverage to portfolios
@@ -268,6 +290,8 @@ for m = firstMonth:nMonths
     marketNeutralWeights_mxwo(m,:) = (lowBetaWeights_mxwo(m,:) * longShortAdj(m)) / longBeta_mxwo - ...
                                     (highBetaWeights_mxwo(m,:) / longShortAdj(m)) / shortBeta_mxwo;
 end
+
+
 
 %% Performance Analysis
 % Calculate forecast errors
@@ -291,6 +315,51 @@ title('VIX Forecasting Performance');
 xlabel('Date'); ylabel('VIX Level');
 grid on;
 
+%% Plot Forecasting Error
+% Ensure both vectors are the same length and properly aligned
+plot_dates = monthlyDates(61:end);
+plot_errors = forecastErrors(61:end);
+
+% Create figure with improved formatting
+figure('Position', [100, 100, 800, 400]);
+plot(plot_dates, plot_errors, 'LineWidth', 1.5);
+hold on;
+
+% Add reference line at zero
+yline(0, '--k', 'LineWidth', 1);
+
+% Formatting improvements
+title('VIX Forecast Errors (GARCH/ARIMA/EWMA)', 'FontSize', 12);
+xlabel('Date', 'FontSize', 10);
+ylabel('Forecast Error (Actual - Predicted)', 'FontSize', 10);
+grid on;
+
+% Add statistical annotations
+mean_error = mean(plot_errors);
+rmse = sqrt(mean(plot_errors.^2));
+text(plot_dates(end-10), max(ylim)-0.1*(max(ylim)-min(ylim)), ...
+    sprintf('Mean Error: %.2f\nRMSE: %.2f', mean_error, rmse), ...
+    'HorizontalAlignment', 'right', 'FontSize', 9);
+
+% Highlight positive/negative errors
+fill_between = [plot_dates; flipud(plot_dates)];
+fill_y = [zeros(size(plot_errors)); flipud(plot_errors)];
+fill(fill_between, fill_y, 'b', 'FaceAlpha', 0.1, 'EdgeColor', 'none');
+
+% Adjust date formatting if needed
+if length(plot_dates) > 24
+    datetick('x', 'yyyy', 'keeplimits');
+else
+    datetick('x', 'mm-yyyy', 'keeplimits');
+end
+
+% Add legend
+legend('Forecast Error', 'Zero Error Line', 'Location', 'best');
+
+
+
+
+%%
 
 % Data cleaning continued
 % Compute monthly returns on the assets. 
